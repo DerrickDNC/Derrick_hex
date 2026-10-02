@@ -1,0 +1,565 @@
+<script setup lang="ts">
+import { storeToRefs } from 'pinia';
+import useMyGamesStore from '../../stores/myGamesStore.js';
+import useLobbyStore from '../../stores/lobbyStore.js';
+import useAuthStore from '../../stores/authStore.js';
+import AppGameThumbnail from '../components/AppGameThumbnail.vue';
+import AppChrono from '../components/AppChrono.vue';
+import AppCreateGameButtons from '../components/AppCreateGameButtons.vue';
+import AppTimeControlLabel from '../components/AppTimeControlLabel.vue';
+import { getMyIndex, getOpponent } from '../../services/context-utils.js';
+import { useHead } from '@unhead/vue';
+import { t } from 'i18next';
+import AppPseudo from '../components/AppPseudo.vue';
+import { canJoin, getStrictWinnerPlayer, getStrictLoserPlayer, isBotGame, isChallengeTargetOf, isGuestBlockedFromRegisteredOnlyGame } from '../../../shared/app/gameUtils.js';
+import { isUncommonBoardsize } from '../../../shared/app/gameOptionsUtils.js';
+import { Game, Tournament } from '../../../shared/app/models/index.js';
+import { formatDistanceToNowStrict } from 'date-fns';
+import { useRouter } from 'vue-router';
+import { useGuestJoiningCorrespondenceWarning } from '../composables/guestJoiningCorrespondenceWarning.js';
+import { computed, onBeforeMount, onBeforeUnmount, ref, useTemplateRef, watch } from 'vue';
+import { apiGetActiveTournaments, apiPostCancel } from '../../apiClient.js';
+import useToastsStore from '../../stores/toastsStore.js';
+import AppFeaturedTournamentCard from '../tournaments/components/AppFeaturedTournamentCard.vue';
+import AppCijmTournamentCard2026 from '../components/AppCijmTournamentCard2026.vue';
+import { IconCalendar, IconCircleFill, IconEye, IconLightningChargeFill, IconSearch, IconTablerSwords, IconTrophyFill, IconX } from '../icons.js';
+import AppLobbyFeaturesLiveGames from '../components/AppLobbyFeaturesLiveGames.vue';
+import AppLobbyFeaturesCorrespondenceGames from '../components/AppLobbyFeaturesCorrespondenceGames.vue';
+import usePlayingGamesCountStore from '../../stores/playingGamesCountStore.js';
+import { useElementHover } from '@vueuse/core';
+import useOnlinePlayersStore from '../../stores/onlinePlayersStore.js';
+import AppRhombusAutoOrientation from '../components/AppRhombusAutoOrientation.vue';
+import AppGameRulesSummary from '../components/AppGameRulesSummary.vue';
+import AppChannel from '../components/AppChannel.vue';
+import { getPlayerLocales } from '../../../shared/app/i18n/index.js';
+
+useHead({
+    title: t('lobby_title'),
+});
+
+const router = useRouter();
+const { mySortedGames, myTurnCount } = storeToRefs(useMyGamesStore());
+const { activePlayersCount } = storeToRefs(useOnlinePlayersStore());
+const lobbyStore = useLobbyStore();
+const { clearSoftRemovedGames } = lobbyStore;
+const { currentLobby, currentLobbyGames, endedGames, waitingGamesCount } = storeToRefs(lobbyStore);
+const { live: livePlayingCount, correspondence: correspondencePlayingCount } = storeToRefs(usePlayingGamesCountStore());
+const authStore = useAuthStore();
+
+const {
+    createGuestJoiningCorrepondenceWarningOverlay,
+    isGuestJoiningCorrepondence,
+} = useGuestJoiningCorrespondenceWarning();
+
+const joinGame = async (game: Game) => {
+    if (isGuestJoiningCorrepondence(game)) {
+        try {
+            await createGuestJoiningCorrepondenceWarningOverlay();
+        } catch (e) {
+            return;
+        }
+    }
+
+    try {
+        await lobbyStore.joinGame(game.publicId);
+    } catch (e) {
+        useToastsStore().addToast('Could not join game', { level: 'danger' });
+        return;
+    }
+
+    await router.push({
+        name: 'online-game',
+        params: { gameId: game.publicId },
+    });
+};
+
+const declineChallenge = async (game: Game) => {
+    const result = await apiPostCancel(game.publicId);
+
+    if (result !== true) {
+        useToastsStore().addToast('Could not decline challenge', { level: 'danger' });
+    }
+};
+
+// Featured tournaments
+const featuredTournaments = ref<null | Tournament[]>(null);
+
+void (async () => {
+    featuredTournaments.value = await apiGetActiveTournaments({
+        featured: true,
+    });
+})();
+
+const featuredTournamentsByState = (state: Tournament['state']) => computed<Tournament[]>(
+    () => (featuredTournaments.value ?? []).filter(tournament => tournament.state === state),
+);
+
+const upcomingTournaments = featuredTournamentsByState('created');
+const runningTournaments = featuredTournamentsByState('running');
+const endedTournaments = featuredTournamentsByState('ended');
+
+// Clear soft removed games
+const gamesListElement = useTemplateRef('gamesList');
+const isHovered = useElementHover(gamesListElement);
+
+// Desktop: clears when mouse leave games list
+// Mobile: clears when tap outside games list, but only after tapped inside.
+watch(isHovered, hovered => {
+    if (!hovered) {
+        clearSoftRemovedGames();
+    }
+});
+
+onBeforeMount(() => clearSoftRemovedGames(true));
+onBeforeUnmount(() => clearSoftRemovedGames(true));
+
+// Lobby locales
+const MAX_LOBBY_CHANNELS = 3;
+const channels = ['lobby-en']; // Suggest lobby-en to everyone
+
+for (const locale of getPlayerLocales()) {
+    if (channels.includes('lobby-' + locale)) {
+        continue;
+    }
+
+    channels.push('lobby-' + locale);
+
+    if (channels.length >= MAX_LOBBY_CHANNELS) {
+        break;
+    }
+}
+</script>
+
+<template>
+    <div class="container-fluid my-3">
+
+        <div class="row">
+            <div class="col-md-8">
+
+                <!-- My turn to play -->
+                <section v-if="mySortedGames && mySortedGames.length > 0" class="mb-4">
+                    <div class="d-flex align-items-center justify-content-between">
+                        <h2 class="d-flex align-items-center gap-2">
+                            {{ myTurnCount > 0 ? $t('lobby_my_turn_to_play') : $t('lobby_my_current_games') }}
+                            <span v-if="myTurnCount > 0" class="badge text-bg-danger">{{ myTurnCount }}</span>
+                        </h2>
+                    </div>
+
+                    <div class="d-flex flex-nowrap gap-3 overflow-auto pb-2">
+                        <template v-for="(myGame, i) of mySortedGames" :key="myGame.publicId">
+                            <router-link
+                                v-if="isChallengeTargetOf(myGame.game, authStore.loggedInPlayer)"
+                                :to="{ name: 'online-game', params: { gameId: myGame.publicId } }"
+                                class="card flex-shrink-0 game-card challenge-card text-decoration-none border-warning"
+                            >
+                                <div class="card-body p-2 d-flex flex-column align-items-center justify-content-center gap-2">
+                                    <div class="d-flex align-items-center gap-1 text-warning fw-semibold small text-center">
+                                        <IconTablerSwords class="flex-shrink-0" />
+                                        {{ $t('lobby_challenges_you_badge') }}
+                                    </div>
+
+                                    <span class="fw-semibold small text-truncate text-body">
+                                        <AppPseudo v-if="myGame.game.host" :player="myGame.game.host" rating onlineStatus />
+                                    </span>
+
+                                    <div class="btn-group btn-group-sm">
+                                        <button
+                                            type="button"
+                                            class="btn btn-success"
+                                            @click.stop.prevent="joinGame(myGame.game)"
+                                        >{{ $t('game.accept') }}</button>
+                                        <button
+                                            type="button"
+                                            class="btn btn-outline-warning"
+                                            :title="$t('decline_challenge')"
+                                            @click.stop.prevent="declineChallenge(myGame.game)"
+                                        ><IconX /></button>
+                                    </div>
+                                </div>
+                            </router-link>
+
+                            <router-link
+                                v-else
+                                :to="{ name: 'online-game', params: { gameId: myGame.publicId } }"
+                                class="card flex-shrink-0 game-card text-decoration-none"
+                                :class="myGame.isMyTurn ? (isBotGame(myGame.game) ? 'border-primary' : 'border-success') : ''"
+                            >
+                                <div class="card-body p-2 d-flex flex-column align-items-center gap-1">
+                                    <div class="d-flex align-items-center gap-1 w-100 justify-content-between">
+                                        <span class="small text-body-secondary">vs</span>
+                                        <span class="fw-semibold small text-truncate text-body text-right">
+                                            <AppPseudo v-if="myGame.game" :player="getOpponent(myGame.game)!" rating onlineStatus />
+                                        </span>
+                                    </div>
+
+                                    <AppGameThumbnail v-if="i < 6" :gamePublicId="myGame.publicId" class="game-thumb" />
+                                    <!-- Prevent displaying too many game views here -->
+                                    <AppRhombusAutoOrientation v-else class="game-thumb" />
+
+                                    <div class="d-flex justify-content-between w-100 align-items-end">
+                                        <template v-if="!isBotGame(myGame.game)">
+                                            <span v-if="myGame.isMyTurn" class="badge text-bg-success pulse-badge">{{ $t('lobby_your_turn_badge') }}</span>
+                                            <span v-else class="badge text-bg-secondary">{{ $t('lobby_waiting_badge') }}</span>
+                                        </template>
+
+                                        <!-- empty div to align chrono right -->
+                                        <span v-else class="badge text-bg-primary">{{ $t('bot') }}</span>
+
+                                        <AppChrono
+                                            v-if="getMyIndex(myGame.game) !== null && myGame.game.timeControl?.players[getMyIndex(myGame.game)!]"
+                                            :playerTimeData="myGame.game.timeControl.players[getMyIndex(myGame.game)!]"
+                                            :timeControlOptions="myGame.game.timeControlType"
+                                            class="chrono"
+                                        />
+                                    </div>
+                                </div>
+                            </router-link>
+                        </template>
+                    </div>
+                </section>
+
+                <!-- Create game -->
+                <h2>{{ $t('new_game') }}</h2>
+
+                <AppCreateGameButtons />
+
+                <!-- Open games -->
+                <section class="mb-4">
+                    <div class="card" ref="gamesList">
+                        <div class="card-header py-0 pe-1 d-flex align-items-stretch justify-content-between">
+                            <span class="fw-bold py-2 d-flex align-items-center text-nowrap">
+                                <span class="d-sm-none">{{ $t('lobby_join') }}</span>
+                                <span class="d-none d-sm-inline">{{ $t('lobby.join_a_game') }}</span>
+                            </span>
+                            <div role="tablist" class="d-flex gap-3 align-items-stretch overflow-hidden">
+                                <button type="button" role="tab" @click="currentLobby = 'live'" :aria-selected="currentLobby === 'live'" class="lobby-tab lobby-tab-live" :class="{ active: currentLobby === 'live' }">
+                                    <IconLightningChargeFill class="flex-shrink-0 me-1" />
+                                    <span class="tab-label">{{ $t('time_cadency.normal') }}</span>
+                                    <span class="badge text-bg-success flex-shrink-0 ms-1">{{ waitingGamesCount.live }}</span>
+                                </button>
+                                <button type="button" role="tab" @click="currentLobby = 'correspondence'" :aria-selected="currentLobby === 'correspondence'" class="lobby-tab lobby-tab-correspondence" :class="{ active: currentLobby === 'correspondence' }">
+                                    <IconCalendar class="flex-shrink-0 me-1" />
+                                    <span class="tab-label">{{ $t('time_cadency.correspondence') }}</span>
+                                    <span class="badge text-bg-warning flex-shrink-0 ms-1">{{ waitingGamesCount.correspondence }}</span>
+                                </button>
+                            </div>
+                        </div>
+                        <div v-if="currentLobbyGames.length > 0" class="table-responsive waiting-games-list">
+                            <table class="table text-nowrap table-borderless table-hover mb-0">
+                                <thead>
+                                    <tr class="small text-body-secondary">
+                                        <th></th>
+                                        <th>{{ $t('game.host') }}</th>
+                                        <th>{{ $t('game.size') }}</th>
+                                        <th>{{ $t('game.time_control') }}</th>
+                                        <th>{{ $t('game.rules') }}</th>
+                                        <th>{{ $t('game.created') }}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="game in currentLobbyGames" :key="game.publicId" :class="{ 'soft-removed': game.softRemoved }">
+                                        <td>
+                                            <router-link
+                                                class="btn btn-sm btn-outline-secondary py-0"
+                                                :to="{ name: 'online-game', params: { gameId: game.publicId } }"
+                                            >{{ $t('game.watch') }}</router-link>
+                                            <span
+                                                v-if="canJoin(game, authStore.loggedInPlayer) || isGuestBlockedFromRegisteredOnlyGame(game, authStore.loggedInPlayer)"
+                                                :title="isGuestBlockedFromRegisteredOnlyGame(game, authStore.loggedInPlayer) ? $t('cannot_join_registered_only') : undefined"
+                                            ><button
+                                                class="btn btn-sm py-0 ms-2"
+                                                :class="game.softRemoved ? 'btn-outline-secondary text-decoration-line-through' : isGuestJoiningCorrepondence(game) ? 'btn-outline-warning' : 'btn-success'"
+                                                @click="joinGame(game)"
+                                                :disabled="Boolean(game.softRemoved) || isGuestBlockedFromRegisteredOnlyGame(game, authStore.loggedInPlayer)"
+                                            >{{ $t('lobby_join') }}</button></span>
+                                            <span v-if="game.ranked" class="text-warning ms-2"><IconTrophyFill /> {{ $t('ranked') }}</span>
+                                        </td>
+                                        <td>
+                                            <AppPseudo v-if="game.host" :player="game.host" flag onlineStatus rating />
+                                            <i v-else>{{ $t('system') }}</i>
+                                        </td>
+                                        <template v-if="!game.softRemoved">
+                                            <td :class="{ 'text-warning': isUncommonBoardsize(game) }">{{ game.boardsize }}×{{ game.boardsize }}</td>
+                                            <td><AppTimeControlLabel :timeControlBoardsize="game" /></td>
+                                            <td class="small"><AppGameRulesSummary :gameOptions="game" /></td>
+                                            <td class="text-body-secondary small">{{ formatDistanceToNowStrict(game.createdAt, { addSuffix: true }) }}</td>
+                                        </template>
+                                        <td v-else colspan="4"><small>{{ $t('lobby_game_no_longer_available') }}</small></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div v-else class="card-body waiting-games-list">
+                            <div class="card-text text-secondary"><i>{{ $t(currentLobby === 'live' ? 'lobby.no_open_live_games' : 'lobby.no_open_correspondence_games') }}</i></div>
+                        </div>
+                    </div>
+                </section>
+
+                <h2>{{ $t('view_games') }}</h2>
+
+                <!-- Playing now -->
+                <section class="mb-4">
+                    <div class="card">
+                        <div class="card-header py-0 pe-1 d-flex align-items-stretch justify-content-between">
+                            <span class="fw-bold py-2 d-flex align-items-center gap-2 text-nowrap">
+                                <IconCircleFill v-if="(livePlayingCount ?? 0) > 0" class="live-indicator" />
+                                <span class="d-sm-none">{{ $t('lobby_playing_now_short') }}</span>
+                                <span class="d-none d-sm-inline">{{ $t('lobby_playing_now') }}</span>
+                            </span>
+                            <div role="tablist" class="d-flex gap-3 align-items-stretch overflow-hidden">
+                                <button type="button" role="tab" @click="currentLobby = 'live'" :aria-selected="currentLobby === 'live'" class="lobby-tab lobby-tab-live" :class="{ active: currentLobby === 'live' }">
+                                    <IconLightningChargeFill class="flex-shrink-0 me-1" />
+                                    <span class="tab-label">{{ $t('time_cadency.normal') }}</span>
+                                    <span class="badge text-bg-success flex-shrink-0 ms-1">{{ livePlayingCount ?? '…' }}</span>
+                                </button>
+                                <button type="button" role="tab" @click="currentLobby = 'correspondence'" :aria-selected="currentLobby === 'correspondence'" class="lobby-tab lobby-tab-correspondence" :class="{ active: currentLobby === 'correspondence' }">
+                                    <IconCalendar class="flex-shrink-0 me-1" />
+                                    <span class="tab-label">{{ $t('time_cadency.correspondence') }}</span>
+                                    <span class="badge text-bg-warning flex-shrink-0 ms-1">{{ correspondencePlayingCount ?? '…' }}</span>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <AppLobbyFeaturesLiveGames v-if="currentLobby === 'live'" />
+                            <AppLobbyFeaturesCorrespondenceGames v-else />
+                        </div>
+                        <div class="card-footer">
+                            <router-link class="btn btn-link text-decoration-none p-0" :to="{ name: 'playing-games', params: { mode: currentLobby } }">
+                                <small><IconEye /> {{ $t('observe_all_playing_games') }}</small>
+                            </router-link>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Recent games -->
+                <section class="mb-4 recent-games">
+                    <div class="card">
+                        <div class="card-header d-flex align-items-center justify-content-between">
+                            <span class="fw-bold">{{ $t('finished_games') }}</span>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table text-nowrap table-borderless table-hover mb-0">
+                                <thead>
+                                    <tr class="small text-secondary">
+                                        <th></th>
+                                        <th></th>
+                                        <th>{{ $t('game.won') }}</th>
+                                        <th>{{ $t('game.lost') }}</th>
+                                        <th>{{ $t('game.size') }}</th>
+                                        <th>{{ $t('game.time_control') }}</th>
+                                        <th>{{ $t('game.finished') }}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="game in endedGames" :key="game.publicId">
+                                        <td>
+                                            <router-link
+                                                class="btn btn-sm btn-outline-secondary py-0"
+                                                :to="{ name: 'online-game', params: { gameId: game.publicId } }"
+                                            >{{ $t('game.review') }}</router-link>
+                                        </td>
+                                        <td><span v-if="game.ranked" class="text-warning"><IconTrophyFill /> <span class="d-none d-sm-inline">{{ $t('ranked') }}</span></span></td>
+                                        <template v-if="game.winner !== null">
+                                            <td><AppPseudo :player="getStrictWinnerPlayer(game)" flag rating classes="fw-semibold" /></td>
+                                            <td><AppPseudo :player="getStrictLoserPlayer(game)" flag rating classes="text-body-secondary" /></td>
+                                        </template>
+                                        <template v-else>
+                                            <td colspan="2" class="text-body-secondary">-</td>
+                                        </template>
+                                        <td>{{ game.boardsize }}×{{ game.boardsize }}</td>
+                                        <td><AppTimeControlLabel :timeControlBoardsize="game" /></td>
+                                        <td class="text-body-secondary small">{{ formatDistanceToNowStrict(game.endedAt ?? game.createdAt, { addSuffix: true }) }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="card-footer">
+                            <router-link class="btn btn-link text-decoration-none p-0" :to="{ name: 'games-archive' }">
+                                <small><IconSearch /> {{ $t('browse_all_ended_games') }}</small>
+                            </router-link>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Sidebar -->
+            <div class="col-md-4">
+
+                <!-- Active players count -->
+                <router-link
+                    :to="{ name: 'online-players' }"
+                    class="card mb-3 text-decoration-none active-players-card"
+                >
+                    <div class="card-body py-2 d-flex align-items-center gap-2">
+                        <IconCircleFill class="text-success active-players-icon" />
+                        <span class="fw-semibold">{{ activePlayersCount ?? '…' }}</span>
+                        <span class="text-body-secondary">{{ $t('lobby_active_players', { count: activePlayersCount }) }}</span>
+                    </div>
+                </router-link>
+
+                <!-- Upcoming events -->
+                <h2 v-if="upcomingTournaments.length > 0">{{ $t('upcoming_events') }}</h2>
+
+                <AppCijmTournamentCard2026 />
+
+                <AppFeaturedTournamentCard
+                    v-for="tournament in upcomingTournaments"
+                    :key="tournament.publicId"
+                    :tournament
+                />
+
+                <AppChannel :channels />
+
+                <!-- Playing tournaments -->
+                <template v-if="runningTournaments.length > 0">
+                    <h6 class="mt-4">{{ $t('playing_tournaments') }}</h6>
+
+                    <AppFeaturedTournamentCard
+                        v-for="tournament in runningTournaments"
+                        :key="tournament.publicId"
+                        :tournament
+                    />
+                </template>
+
+                <!-- Past tournaments -->
+                <template v-if="endedTournaments.length > 0">
+                    <h6 class="mt-4">{{ $t('past_tournaments') }}</h6>
+
+                    <AppFeaturedTournamentCard
+                        v-for="tournament in endedTournaments"
+                        :key="tournament.publicId"
+                        :tournament
+                    />
+                </template>
+
+            </div>
+        </div>
+    </div>
+</template>
+
+<style lang="stylus" scoped>
+.game-card
+    width 12em
+
+.game-thumb
+    margin auto
+    height 95px
+
+.challenge-card
+    justify-content center
+
+@css {
+    .challenge-card {
+        background: rgba(var(--bs-warning-rgb), 0.08);
+    }
+
+    .challenge-card:hover {
+        background: rgba(var(--bs-warning-rgb), 0.15);
+    }
+}
+
+.chrono
+    font-size 0.75em
+    font-family monospace
+
+.event-card
+    background var(--bs-body-bg)
+    overflow hidden
+
+.event-bg-icon
+    position absolute
+    top 0.4rem
+    right 0.3rem
+    font-size 4.5rem
+    opacity 0.1
+    pointer-events none
+
+.event-meta
+    font-size 0.75em
+
+@css {
+    @keyframes pulse-ring {
+        0%   { box-shadow: 0 0 0 0   rgba(var(--bs-success-rgb), 0.7); }
+        70%  { box-shadow: 0 0 0 7px rgba(var(--bs-success-rgb), 0); }
+        100% { box-shadow: 0 0 0 0   rgba(var(--bs-success-rgb), 0); }
+    }
+}
+
+.pulse-badge
+    animation pulse-ring 2s ease-in-out infinite
+
+.card .table
+    thead
+        th, td
+            color var(--bs-tertiary-color)
+            font-weight 400
+            font-size 1em
+
+    tr:first-child, td:first-child
+        padding-inline-start 1em
+
+    tr:last-child, td:last-child
+        padding-inline-end 1em
+
+.waiting-games-list
+    height 14em
+
+.active-players-icon
+    font-size 0.65em
+
+tr.soft-removed, tr.soft-removed *
+    color var(--bs-secondary-color) !important
+
+.live-indicator
+    font-size 0.55em
+    color var(--bs-danger)
+    animation live-pulse 1.5s ease-in-out infinite
+
+@css {
+    @keyframes live-pulse {
+        0%, 100% { opacity: 1; }
+        50%      { opacity: 0.25; }
+    }
+}
+
+.lobby-tab
+    background none
+    border none
+    border-bottom 2px solid transparent
+    cursor pointer
+    color var(--bs-secondary-color)
+    font-weight 500
+    font-size 0.95rem
+    white-space nowrap
+    transition color 0.15s, border-color 0.15s
+    display flex
+    align-items center
+    min-width 0
+    min-height 2.5em
+    overflow hidden
+
+.tab-label
+    overflow hidden
+    text-overflow ellipsis
+    white-space nowrap
+    min-width 0
+
+    &:hover
+        color var(--bs-body-color)
+
+    &.active
+        cursor default
+
+
+.lobby-tab-live.active
+    border-bottom-color var(--bs-success)
+    color var(--bs-success)
+
+.lobby-tab-correspondence.active
+    border-bottom-color var(--bs-warning)
+    color var(--bs-warning)
+
+.recent-games
+    .table-responsive
+        min-height 14em
+</style>

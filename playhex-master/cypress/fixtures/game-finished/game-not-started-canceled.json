@@ -1,0 +1,66 @@
+{
+    "publicId": "00000000-0000-0000-0000-000000000000",
+    "host": {
+        "pseudo": "aa",
+        "publicId": "cec49907-633e-49cb-b720-7dad6c248753",
+        "isGuest": false,
+        "isBot": false,
+        "slug": "aa",
+        "createdAt": "2024-01-24T16:33:29.586Z",
+        "currentRating": null
+    },
+    "gameToPlayers": [
+        {
+            "player": {
+                "pseudo": "aa",
+                "publicId": "cec49907-633e-49cb-b720-7dad6c248753",
+                "isGuest": false,
+                "isBot": false,
+                "slug": "aa",
+                "createdAt": "2024-01-24T16:33:29.586Z",
+                "currentRating": null
+            }
+        }
+    ],
+    "timeControl": {
+        "state": "ready",
+        "currentPlayer": 0,
+        "players": [
+            {
+                "totalRemainingTime": 600000
+            },
+            {
+                "totalRemainingTime": 600000
+            }
+        ]
+    },
+    "boardsize": 11,
+    "firstPlayer": null,
+    "swapRule": true,
+    "opponentType": "player",
+    "timeControlType": {
+        "family": "fischer",
+        "options": {
+            "initialTime": 600000,
+            "timeIncrement": 5000,
+            "maxTime": 600000
+        }
+    },
+    "chatMessages": [],
+    "state": "canceled",
+    "createdAt": "2024-01-24T20:20:48.826Z",
+    "moves": [],
+    "moveTimestamps": [],
+    "currentPlayerIndex": 0,
+    "winner": null,
+    "outcome": null,
+    "tournamentMatch": null,
+    "undoRequest": null,
+    "rematch": null,
+    "rematchedFrom": null,
+    "startedAt": null,
+    "lastMoveAt": null,
+    "opponentPublicId": null,
+    "ranked": true,
+    "endedAt": "2025-09-17T17:16:11.943Z"
+}

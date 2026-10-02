@@ -1,0 +1,112 @@
+import { Column, Entity, Index, JoinColumn, OneToOne, PrimaryGeneratedColumn, type Relation } from 'typeorm';
+import { ColumnUUID } from '../custom-typeorm.js';
+import { Expose, GROUP_DEFAULT as GROUP_DEFAULT } from '../class-transformer-custom.js';
+import AIConfig from './AIConfig.js';
+import { IsDate } from 'class-validator';
+import { Type } from 'class-transformer';
+import Rating from './Rating.js';
+import { keysOf } from '../utils.js';
+
+@Entity()
+@Index(keysOf<Player>()('isGuest', 'isBot', 'pseudo'))
+@Index(keysOf<Player>()('avatarUpdatedAt'))
+export default class Player
+{
+    @PrimaryGeneratedColumn()
+    id?: number;
+
+    /**
+     * Used for displays
+     */
+    @Column({ length: 34, unique: true })
+    @Expose({ groups: [GROUP_DEFAULT, 'rating', 'playerNotification', 'lobby', 'player_moderation_action', 'channel'] })
+    pseudo: string;
+
+    /**
+     * Used to identify a player
+     */
+    @ColumnUUID({ unique: true })
+    @Expose({ groups: [GROUP_DEFAULT, 'ai_config', 'rating', 'playerNotification', 'lobby', 'player_moderation_action', 'channel'] })
+    publicId: string;
+
+    /**
+     * Show an italized "Guest" before pseudo
+     */
+    @Column({ default: false })
+    @Expose({ groups: [GROUP_DEFAULT, 'rating', 'playerNotification', 'lobby', 'player_moderation_action', 'channel'] })
+    isGuest: boolean;
+
+    /**
+     * Used to know that we use an AI to generate moves. Show a robot icon before pseudo
+     */
+    @Column({ default: false })
+    @Expose({ groups: [GROUP_DEFAULT, 'rating', 'playerNotification', 'lobby'] })
+    isBot: boolean;
+
+    /**
+     * Used for link to profile page, SGF file name
+     */
+    @Column({ length: 34, unique: true })
+    @Expose({ groups: [GROUP_DEFAULT, 'rating', 'playerNotification', 'lobby', 'channel'] })
+    slug: string;
+
+    /**
+     * When player came on PlayHex for the first time.
+     * In most case, this is the date of the creation of the guest session.
+     * Displayed on profile page.
+     */
+    @Column({ default: () => 'current_timestamp()' })
+    @Expose({ groups: [GROUP_DEFAULT, 'rating', 'playerNotification', 'lobby'] })
+    @IsDate()
+    createdAt: Date;
+
+    /**
+     * When player registered an account.
+     */
+    @Column({ type: Date, nullable: true })
+    @Expose({ groups: ['moderation'] })
+    registeredAt?: null | Date;
+
+    /**
+     * For AI players, their config.
+     * Should not be null for AI players: they must all have a AIConfig entry.
+     */
+    @OneToOne(() => AIConfig, aiConfig => aiConfig.player)
+    aiConfig?: Relation<AIConfig>;
+
+    /**
+     * Link to current player overall rating.
+     * If not set, consider player has not played ranked game yet,
+     * and have default rating, see createInitialRating().
+     */
+    @OneToOne(() => Rating, { eager: true, cascade: true })
+    @JoinColumn()
+    @Expose({ groups: [GROUP_DEFAULT, 'lobby'] })
+    @Type(() => Rating)
+    currentRating?: Rating;
+
+    /**
+     * Whether this player is shadow banned:
+     * - can send chat messages, but only visible to himself.
+    *       All chat messages posted while being shadow banned
+     *      are marked as shadow deleted.
+     */
+    @Column({ default: false })
+    shadowBanned?: boolean;
+
+    @Column({ type: String, nullable: true, default: null })
+    @Expose({ groups: [GROUP_DEFAULT, 'playerNotification', 'lobby'] })
+    avatarPath?: null | string;
+
+    @Column({ type: String, nullable: true, default: null })
+    @Expose({ groups: [GROUP_DEFAULT, 'playerNotification', 'lobby'] })
+    avatarThumbnailPath?: null | string;
+
+    @Column({ type: Date, nullable: true, default: null })
+    @Expose({ groups: ['moderation'] })
+    avatarUpdatedAt?: null | Date;
+
+    @Column({ type: String, nullable: true, default: null, length: 8 })
+    @Expose({ groups: [GROUP_DEFAULT, 'playerNotification', 'lobby'] })
+    countryFlag?: null | string;
+}

@@ -1,0 +1,788 @@
+<script lang="ts" setup>
+import { storeToRefs } from 'pinia';
+import useAuthStore from '../../../stores/authStore.js';
+import { IconPerson, IconPersonUp, IconBoxArrowRight, IconGear, IconTrophyFill, IconX, IconFlag } from '../../icons.js';
+import { Game, GameOptions, Player, PlayerHeadToHeadStats, PlayerStats, Rating } from '../../../../shared/app/models/index.js';
+import { getPlayerBySlug, apiGetPlayerStats, apiGetHeadToHeadStats, apiGetPlayerCurrentRatings, getGames, apiGetPlayerActiveGames } from '../../../apiClient.js';
+import { useCreateGameOverlay } from '../../composables/useCreateGameOverlay.js';
+import { Ref, computed, ref, useTemplateRef, watch } from 'vue';
+import type { ComponentExposed } from 'vue-component-type-helpers';
+import { format } from 'date-fns';
+import useMyGamesStore from '../../../stores/myGamesStore.js';
+import AppPseudo from '../../components/AppPseudo.vue';
+import AppOnlineStatus from '../../components/AppOnlineStatus.vue';
+import AppTimeControlLabel from '../../components/AppTimeControlLabel.vue';
+import AppGameRulesSummary from '../../components/AppGameRulesSummary.vue';
+import AppPlayerStats from '../../components/AppPlayerStats.vue';
+import AppPlayerHeadToHead from '../../components/AppPlayerHeadToHead.vue';
+import AppPlayerRatingChart from '../../components/AppPlayerRatingChart.vue';
+import AppTablePlayerRating from '../../components/AppTablePlayerRating.vue';
+import AppSearchGamesParameters from '../../components/AppSearchGamesParameters.vue';
+import { useRoute, useRouter } from 'vue-router';
+import { injectHead, useSeoMeta } from '@unhead/vue';
+import { definePerson, useSchemaOrg } from '@unhead/schema-org';
+import { pseudoString } from '../../../../shared/app/pseudoUtils.js';
+import { formatDistanceToNowStrict } from 'date-fns';
+import useServerDateStore from '../../../stores/serverDateStore.js';
+import { watchEffect } from 'vue';
+import { RatingCategory } from '../../../../shared/app/ratingUtils.js';
+import { Directive } from 'vue';
+import SearchGamesParameters from '../../../../shared/app/SearchGamesParameters.js';
+import { getOtherPlayerStrict, hasWon } from '../../../../shared/app/gameUtils.js';
+import { useSearchGamesPagination } from '../../composables/searchGamesPagination.js';
+import { DomainHttpError } from '../../../../shared/app/DomainHttpError.js';
+import { isMe } from '../../../services/context-utils.js';
+import { apiGetPlayerIsCurrentlyChatRestricted, apiUploadPlayerAvatar, apiUpdatePlayerCountryFlag } from '../../../apiClient.js';
+import useToastsStore from '../../../stores/toastsStore.js';
+import { defineOverlay } from '@overlastic/vue';
+import AppAvatarCropOverlay from '../../components/overlay/AppAvatarCropOverlay.vue';
+import AppFlagSelectorOverlay from '../../components/overlay/AppFlagSelectorOverlay.vue';
+
+const { slug } = useRoute().params;
+
+if (Array.isArray(slug)) {
+    throw new Error('Unexpected array in "slug" param');
+}
+
+const head = injectHead();
+
+/*
+ * Player meta tags
+ */
+const updateMeta = (player: Player): void => {
+    useSeoMeta({
+        title: pseudoString(player, 'pseudo'),
+
+        // index only bots (Mohex) profile page.
+        // Guest should never be indexed,
+        // players only if they explicitely agree (settings)
+        robots: player.isBot ? 'index' : 'noindex',
+
+        ogTitle: `${pseudoString(player, 'pseudo')}`,
+        ogType: 'profile',
+        ogUrl: window.location.href,
+        twitterCard: 'summary',
+    }, { head });
+
+    useSchemaOrg(head, [
+        definePerson({
+            name: pseudoString(player, 'pseudo'),
+            url: window.location.href,
+        }),
+    ], {
+        tagPosition: 'head', // Should be the default, but not the case: https://github.com/unjs/unhead/issues/563
+    });
+};
+
+/*
+ * Player data
+ */
+const { loggedInPlayer } = storeToRefs(useAuthStore());
+
+/**
+ * Can be me, or another player (when seeing other player profile page)
+ */
+const player: Ref<null | Player> = loggedInPlayer.value?.slug === slug
+    ? loggedInPlayer
+    : ref(null)
+;
+
+const playerNotFound = ref(false);
+
+const { create1v1RankedAndJoinGame, create1v1FriendlyAndJoinGame } = useCreateGameOverlay();
+
+const challenge = (mode: 'ranked' | 'friendly') => {
+    if (!player.value) {
+        return;
+    }
+
+    const gameOptions = new GameOptions();
+    gameOptions.opponentPublicId = player.value.publicId;
+
+    if (mode === 'ranked') {
+        void create1v1RankedAndJoinGame(gameOptions, player.value);
+    } else {
+        void create1v1FriendlyAndJoinGame(gameOptions, player.value);
+    }
+};
+
+void (async () => {
+    try {
+        if (player.value === null) {
+            player.value = await getPlayerBySlug(slug);
+        }
+
+        updateMeta(player.value);
+    } catch (e) {
+        if (e instanceof DomainHttpError) {
+            if (e.type === 'player_not_found') {
+                playerNotFound.value = true;
+                return;
+            }
+        }
+
+        throw e;
+    }
+})();
+
+/*
+ * Current games
+ */
+const { mySortedGames } = storeToRefs(useMyGamesStore());
+const otherPlayerActiveGames = ref<Game[]>([]);
+
+watchEffect(async () => {
+    if (player.value === null || loggedInPlayer.value?.publicId === player.value.publicId) {
+        otherPlayerActiveGames.value = [];
+        return;
+    }
+
+    otherPlayerActiveGames.value = await apiGetPlayerActiveGames(player.value.publicId);
+});
+
+const currentGames = computed((): Game[] => {
+    if (player.value === null) return [];
+
+    if (loggedInPlayer.value?.publicId === player.value.publicId) {
+        return mySortedGames.value
+            .map(g => g.game)
+            .filter(game => game.state === 'playing')
+        ;
+    }
+
+    return otherPlayerActiveGames.value.filter(game => game.state === 'playing');
+});
+
+/*
+ * Games history
+ */
+const gamesHistory = ref<null | Game[]>(null);
+const totalResults = ref<null | number>(null);
+const DEFAULT_PAGE_SIZE = 15;
+
+const searchGamesParameters = ref<SearchGamesParameters>({
+    players: player.value === null
+        ? undefined
+        : [{ publicId: player.value.publicId }]
+    ,
+    opponentType: 'player',
+    states: ['ended'],
+    endedAtSort: 'desc',
+    paginationPageSize: DEFAULT_PAGE_SIZE,
+});
+
+const { totalPages, goPagePrevious, goPageNext } = useSearchGamesPagination(
+    searchGamesParameters,
+    totalResults,
+    DEFAULT_PAGE_SIZE,
+);
+
+// Set filter to current player, but keep same filter if already set on this player
+watch(player, newPlayer => {
+    if (newPlayer === null) {
+        return;
+    }
+
+    if (undefined === searchGamesParameters.value.players
+        || searchGamesParameters.value.players.every(p => p.publicId !== newPlayer.publicId)
+    ) {
+        searchGamesParameters.value.players = [
+            { publicId: newPlayer.publicId },
+        ];
+    }
+});
+
+// Update games list when filters change
+watchEffect(async () => {
+    // Do not search yet to prevent having games without current player,
+    // which is impossible to display in this page table because we need to display the opponent to currentPlayer
+    if (undefined === searchGamesParameters.value.players || searchGamesParameters.value.players.length === 0) {
+        return;
+    }
+
+    const { results, count } = await getGames(searchGamesParameters.value);
+
+    gamesHistory.value = results;
+    totalResults.value = count;
+});
+
+const router = useRouter();
+
+const clickLogout = async () => {
+    gamesHistory.value = [];
+    const newPlayer = await useAuthStore().logout();
+
+    void router.push({
+        name: 'player',
+        params: {
+            slug: newPlayer.slug,
+        },
+    });
+};
+
+/**
+ * ping and date shift
+ */
+const { pingTime, medianShift } = storeToRefs(useServerDateStore());
+
+/*
+ * Player stats
+ */
+const playerStats = ref<null | PlayerStats>(null);
+
+watchEffect(async () => {
+    if (player.value === null) {
+        playerStats.value = null;
+        return;
+    }
+
+    playerStats.value = await apiGetPlayerStats(player.value.publicId);
+});
+
+/*
+ * Head to head stats, only when visiting another (non bot) player profile while logged in
+ */
+const headToHead = ref<null | PlayerHeadToHeadStats>(null);
+
+const shouldShowHeadToHead = computed<boolean>(() => player.value !== null
+    && loggedInPlayer.value !== null
+    && !player.value.isBot
+    && !isMe(player.value),
+);
+
+watchEffect(async () => {
+    if (!shouldShowHeadToHead.value || player.value === null || loggedInPlayer.value === null) {
+        headToHead.value = null;
+        return;
+    }
+
+    headToHead.value = await apiGetHeadToHeadStats(loggedInPlayer.value.publicId, player.value.publicId);
+});
+
+/**
+ * Filter games history on both players, and scroll to it.
+ */
+const showOurGames = () => {
+    if (player.value === null || loggedInPlayer.value === null) {
+        return;
+    }
+
+    searchGamesParameters.value.players = [
+        { publicId: player.value.publicId },
+        { publicId: loggedInPlayer.value.publicId },
+    ];
+
+    searchGamesParameters.value.paginationPage = 0;
+
+    gamesHistoryHeading.value?.scrollIntoView({ behavior: 'smooth' });
+};
+
+const gamesHistoryHeading = useTemplateRef<HTMLElement>('gamesHistoryHeading');
+
+const playerCurrentRatings = ref<null | Partial<Record<RatingCategory, Rating>>>(null);
+
+watchEffect(async () => {
+    if (player.value === null) {
+        playerStats.value = null;
+        return;
+    }
+
+    playerCurrentRatings.value = null;
+    const ratings = await apiGetPlayerCurrentRatings(player.value.publicId);
+
+    if (ratings === null) {
+        return;
+    }
+
+    playerCurrentRatings.value = {};
+
+    for (const rating of ratings) {
+        playerCurrentRatings.value[rating.category] = rating;
+    }
+});
+
+const ratingChart = useTemplateRef<ComponentExposed<typeof AppPlayerRatingChart>>('ratingChart');
+
+const showRatingCategory = (category: RatingCategory): void => {
+    if (!ratingChart.value) {
+        return;
+    }
+
+    ratingChart.value.showRatingCategory(category);
+};
+
+/*
+ * Moderation status for other players
+ */
+const isChatRestricted = ref<null | boolean>(null);
+
+watchEffect(async () => {
+    if (player.value === null || isMe(player.value)) {
+        isChatRestricted.value = null;
+        return;
+    }
+
+    isChatRestricted.value = await apiGetPlayerIsCurrentlyChatRestricted(player.value.publicId);
+});
+
+const vRating: Directive<HTMLElement, RatingCategory> = {
+    mounted: (el, binding) => {
+        el.classList.add('clickable-rating');
+        el.addEventListener('click', () => {
+            showRatingCategory(binding.value);
+        });
+    },
+};
+
+/*
+ * Avatar upload
+ */
+const avatarCropOverlay = defineOverlay(AppAvatarCropOverlay);
+
+const onAvatarFileSelected = async (event: Event) => {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+
+    if (!file || !player.value) return;
+
+    let blob: Blob;
+    try {
+        blob = await avatarCropOverlay({ file });
+    } catch {
+        return; // user cancelled
+    }
+
+    try {
+        const { avatarPath, avatarThumbnailPath } = await apiUploadPlayerAvatar(player.value.publicId, blob, file.type);
+
+        player.value.avatarPath = avatarPath;
+        player.value.avatarThumbnailPath = avatarThumbnailPath;
+    } catch (e) {
+        if (!(e instanceof Error)) {
+            throw e;
+        }
+
+        useToastsStore().addToast(e.message, { level: 'danger' });
+    }
+};
+
+/*
+ * Country flag shortcut: when I have no flag yet, I can set it from my profile page
+ */
+const flagSelectorOverlay = defineOverlay(AppFlagSelectorOverlay);
+
+const canSetCountryFlag = computed(() => player.value !== null
+    && isMe(player.value)
+    && !player.value.isGuest
+    && !player.value.countryFlag,
+);
+
+const setCountryFlag = async () => {
+    if (!player.value) {
+        return;
+    }
+
+    let countryFlag: null | string;
+
+    try {
+        countryFlag = await flagSelectorOverlay({ modelValue: player.value.countryFlag ?? null });
+    } catch {
+        return; // user cancelled
+    }
+
+    try {
+        await apiUpdatePlayerCountryFlag(player.value.publicId, countryFlag);
+
+        player.value.countryFlag = countryFlag;
+    } catch (e) {
+        if (!(e instanceof Error)) {
+            throw e;
+        }
+
+        useToastsStore().addToast(e.message, { level: 'danger' });
+    }
+};
+
+const timeRangeUpdated = (from: null | Date, to: null | Date) => {
+    let isZoomed = from || to;
+
+    if (from) {
+        searchGamesParameters.value.fromEndedAt = from;
+    }
+
+    if (to) {
+        searchGamesParameters.value.toEndedAt = to;
+    }
+
+    if (isZoomed) {
+        searchGamesParameters.value.ranked = true;
+        searchGamesParameters.value.opponentType = undefined;
+        searchGamesParameters.value.endedAtSort = 'asc';
+        searchGamesParameters.value.states = ['ended'];
+    } else {
+        searchGamesParameters.value.fromEndedAt = undefined;
+        searchGamesParameters.value.toEndedAt = undefined;
+        searchGamesParameters.value.endedAtSort = 'desc';
+    }
+};
+</script>
+
+<template>
+    <div v-if="!playerNotFound" class="container-fluid my-3">
+        <div class="d-flex mb-4">
+            <div class="avatar-wrapper">
+
+                <!-- me, not guest, no avatar yet, show "change avatar" -->
+                <label v-if="player && isMe(player) && !player.isGuest" class="avatar-upload-label">
+                    <img v-if="player.avatarPath" :src="player.avatarPath" class="avatar-img bg-body" :alt="player.pseudo" />
+                    <IconPerson v-else class="icon bg-body" />
+                    <span class="avatar-upload-hint">{{ $t('player_settings.change_avatar') }}</span>
+                    <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/gif,image/webp"
+                        class="d-none"
+                        @change="onAvatarFileSelected"
+                    />
+                </label>
+
+                <!-- not me, but avatar, show avatar -->
+                <template v-else>
+                    <img v-if="player?.avatarPath" :src="player.avatarPath" class="avatar-img bg-body" :alt="player?.pseudo" />
+                    <IconPerson v-else class="icon bg-body" />
+                </template>
+
+                <AppOnlineStatus v-if="player" :player class="player-status" />
+            </div>
+            <div>
+                <h2 class="pseudo-heading">
+                    <AppPseudo v-if="player" :player flag /><template v-else>…</template>
+
+                    <button
+                        v-if="canSetCountryFlag"
+                        type="button"
+                        class="empty-flag"
+                        :title="$t('country_flag.set_yours')"
+                        :aria-label="$t('country_flag.set_yours')"
+                        @click="setCountryFlag()"
+                    ><IconFlag /></button>
+                </h2>
+
+                <p v-if="player && !player.isGuest" class="mb-0">{{ $t('account_created_on', { date: player?.createdAt
+                    ? format(player?.createdAt, 'd MMMM y')
+                    : '…' })
+                }}</p>
+
+                <p v-if="player && isMe(player)" class="text-body-secondary">
+                    <small>
+                        {{ $t('ping.ping_ms', { ms: pingTime }) }}
+                        –
+                        {{ $t('ping.date_shift_ms', { ms: medianShift }) }}
+                    </small>
+                </p>
+
+                <div v-if="player && isMe(player)" class="player-btns mt-3">
+                    <template v-if="player.isGuest">
+                        <router-link
+                            :to="{ name: 'signup' }"
+                            class="btn btn-success"
+                        ><IconPersonUp /> {{ $t('create_account') }}</router-link>
+
+                        <router-link
+                            :to="{ name: 'login' }"
+                            class="btn btn-primary"
+                        >{{ $t('log_in') }}</router-link>
+                    </template>
+
+                    <template v-else>
+                        <button
+                            type="button"
+                            class="btn btn-sm btn-outline-warning"
+                            @click="clickLogout()"
+                        >{{ $t('log_out') }} <IconBoxArrowRight /></button>
+                    </template>
+
+                    <router-link
+                        :to="{ name: 'settings' }"
+                        class="btn btn-sm btn-outline-primary"
+                    ><IconGear /> {{ $t('player_settings.title') }}</router-link>
+                </div>
+
+            </div>
+        </div>
+
+        <AppPlayerHeadToHead
+            v-if="shouldShowHeadToHead && headToHead"
+            :headToHead
+            @showOurGames="showOurGames"
+            @challenge="challenge"
+        />
+
+        <AppPlayerStats v-if="playerStats" :playerStats />
+
+        <p v-if="player && !isMe(player) && isChatRestricted" class="mt-3 text-danger">
+            <IconX /> This player's chat is currently restricted.
+        </p>
+
+        <h3 class="mt-4">{{ $t('rating') }}</h3>
+
+        <div class="row">
+            <div class="col-lg-6 col-xl-5">
+                <div class="table-responsive">
+                    <table v-if="playerCurrentRatings" class="table table-bordered ratings-table">
+                        <tbody class="text-nowrap">
+                            <tr>
+                                <td rowspan="2" colspan="2" class="text-center mb-0" v-rating="'overall'">
+                                    <strong>{{ $t('overall') }}</strong>
+                                    <br>
+                                    <AppTablePlayerRating :rating="playerCurrentRatings.overall" class="lead" />
+                                </td>
+                                <th v-rating="'blitz'">{{ $t('time_cadency.blitz') }}</th>
+                                <th v-rating="'normal'">{{ $t('time_cadency.normal') }}</th>
+                                <th v-rating="'correspondence'">{{ $t('time_cadency.correspondence') }}</th>
+                            </tr>
+                            <tr>
+                                <td><AppTablePlayerRating :rating="playerCurrentRatings.blitz" /></td>
+                                <td><AppTablePlayerRating :rating="playerCurrentRatings.normal" /></td>
+                                <td><AppTablePlayerRating :rating="playerCurrentRatings.correspondence" /></td>
+                            </tr>
+                            <tr>
+                                <th v-rating="'small'">{{ $t('boardsize.small') }}</th>
+                                <td><AppTablePlayerRating :rating="playerCurrentRatings.small" /></td>
+                                <td><AppTablePlayerRating :rating="playerCurrentRatings['small.blitz']" /></td>
+                                <td><AppTablePlayerRating :rating="playerCurrentRatings['small.normal']" /></td>
+                                <td><AppTablePlayerRating :rating="playerCurrentRatings['small.correspondence']" /></td>
+                            </tr>
+                            <tr>
+                                <th v-rating="'medium'">{{ $t('boardsize.medium') }}</th>
+                                <td><AppTablePlayerRating :rating="playerCurrentRatings.medium" /></td>
+                                <td><AppTablePlayerRating :rating="playerCurrentRatings['medium.blitz']" /></td>
+                                <td><AppTablePlayerRating :rating="playerCurrentRatings['medium.normal']" /></td>
+                                <td><AppTablePlayerRating :rating="playerCurrentRatings['medium.correspondence']" /></td>
+                            </tr>
+                            <tr>
+                                <th v-rating="'large'">{{ $t('boardsize.large') }}</th>
+                                <td><AppTablePlayerRating :rating="playerCurrentRatings.large" /></td>
+                                <td><AppTablePlayerRating :rating="playerCurrentRatings['large.blitz']" /></td>
+                                <td><AppTablePlayerRating :rating="playerCurrentRatings['large.normal']" /></td>
+                                <td><AppTablePlayerRating :rating="playerCurrentRatings['large.correspondence']" /></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="col-lg-6 col-xl-7">
+                <AppPlayerRatingChart ref="ratingChart" v-if="player" :player @timeRangeUpdated="timeRangeUpdated" />
+            </div>
+        </div>
+
+        <h3 class="mt-4">{{ $t('player_current_games') }}</h3>
+
+        <div class="table-responsive">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th scope="col"></th>
+                        <th scope="col"></th>
+                        <th scope="col">{{ $t('game.opponent') }}</th>
+                        <th scope="col">{{ $t('game.size') }}</th>
+                        <th scope="col">{{ $t('game.time_control') }}</th>
+                        <th scope="col">{{ $t('game.rules') }}</th>
+                        <th scope="col">{{ $t('game.started') }}</th>
+                    </tr>
+                </thead>
+                <tbody v-if="player">
+                    <tr
+                        v-for="game in currentGames"
+                        :key="game.publicId"
+                    >
+                        <td class="ps-0">
+                            <router-link
+                                :to="{ name: 'online-game', params: { gameId: game.publicId } }"
+                                class="btn btn-sm btn-link"
+                            >{{ $t('game.watch') }}</router-link>
+                        </td>
+                        <td>
+                            <span v-if="game.ranked" class="text-warning"><IconTrophyFill /> <span class="d-none d-md-inline">{{ $t('ranked') }}</span></span>
+                        </td>
+                        <td><AppPseudo rating onlineStatus :player="getOtherPlayerStrict(game, player)" /></td>
+                        <td>{{ game.boardsize }}</td>
+                        <td><AppTimeControlLabel :timeControlBoardsize="game" /></td>
+                        <td><AppGameRulesSummary :gameOptions="game" /></td>
+                        <td>{{
+                            formatDistanceToNowStrict(game.startedAt ?? 0, { addSuffix: true })
+                        }}</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <h3 ref="gamesHistoryHeading">{{ $t('player_game_history') }}</h3>
+
+        <AppSearchGamesParameters :searchGamesParameters />
+
+        <p v-if="null !== totalResults">{{ $t('n_total_games', { count: totalResults }) }}</p>
+        <p v-else>…</p>
+
+        <div class="card">
+            <div class="card-header d-flex align-items-center gap-2">
+                <button @click="goPagePrevious" class="btn btn-sm btn-outline-primary" :class="{ disabled: (searchGamesParameters.paginationPage ?? 0) < 1 }">{{ $t('previous') }}</button>
+                <span>{{ $t('page_page_of_max', { page: (searchGamesParameters.paginationPage ?? 0) + 1, max: totalPages }) }}</span>
+                <button @click="goPageNext" class="btn btn-sm btn-outline-primary" :class="{ disabled: (searchGamesParameters.paginationPage ?? 0) + 1 >= totalPages }">{{ $t('next') }}</button>
+            </div>
+
+            <div v-if="gamesHistory && gamesHistory.length > 0" class="table-responsive">
+                <table class="table text-nowrap mb-0">
+                    <thead>
+                        <tr>
+                            <th scope="col"></th>
+                            <th scope="col"></th>
+                            <th scope="col">{{ $t('game.outcome') }}</th>
+                            <th scope="col">{{ $t('game.opponent') }}</th>
+                            <th scope="col">{{ $t('game.size') }}</th>
+                            <th scope="col">{{ $t('game.time_control') }}</th>
+                            <th scope="col">{{ $t('game.rules') }}</th>
+                            <th scope="col">{{ $t('game.finished') }}</th>
+                        </tr>
+                    </thead>
+                    <tbody v-if="player">
+                        <tr
+                            v-for="game in gamesHistory"
+                            :key="game.publicId"
+                        >
+                            <td class="ps-0">
+                                <router-link
+                                    :to="{ name: 'online-game', params: { gameId: game.publicId } }"
+                                    class="btn btn-sm btn-link"
+                                >{{ $t('game.review') }}</router-link>
+                            </td>
+                            <td>
+                                <span v-if="game.ranked" class="text-warning"><IconTrophyFill /> <span class="d-none d-md-inline">{{ $t('ranked') }}</span></span>
+                            </td>
+
+                            <td v-if="'canceled' === game.state" style="width: 7em">{{ $t('game_state.canceled') }}</td>
+                            <td v-else-if="hasWon(game, player)" style="width: 7em" class="text-success">{{ $t('outcome.win') }}</td>
+                            <td v-else style="width: 7em" class="text-danger">{{ $t(game.outcome === 'path' ? 'outcome.loss' : 'outcome.' + (game.outcome ?? 'loss')) }}</td>
+
+                            <td v-if="game.gameToPlayers.length < 2">-</td>
+                            <td v-else><AppPseudo rating onlineStatus :player="getOtherPlayerStrict(game, player)" /></td>
+
+                            <td>{{ game.boardsize }}</td>
+                            <td><AppTimeControlLabel :timeControlBoardsize="game" /></td>
+                            <td><AppGameRulesSummary :gameOptions="game" /></td>
+                            <td>{{
+                                game.endedAt ? format(game.endedAt, 'd MMMM yyyy p') : '-'
+                            }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div v-if="gamesHistory && gamesHistory.length > 0" class="card-footer d-flex align-items-center gap-2">
+                <button @click="goPagePrevious" class="btn btn-sm btn-outline-primary" :class="{ disabled: (searchGamesParameters.paginationPage ?? 0) < 1 }">{{ $t('previous') }}</button>
+                <span>{{ $t('page_page_of_max', { page: (searchGamesParameters.paginationPage ?? 0) + 1, max: totalPages }) }}</span>
+                <button @click="goPageNext" class="btn btn-sm btn-outline-primary" :class="{ disabled: (searchGamesParameters.paginationPage ?? 0) + 1 >= totalPages }">{{ $t('next') }}</button>
+            </div>
+        </div>
+    </div>
+
+    <div v-else class="container">
+        <p class="text-center lead mt-2">{{ $t('no_such_player') }}</p>
+    </div>
+</template>
+
+<style lang="stylus" scoped>
+.icon
+    font-size 8em
+    width 1em
+    height 0.866em
+    clip-path polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%)
+    padding 1.25rem
+
+.player-btns > *
+    margin-bottom 0.5em
+    margin-inline-end 1em
+
+.avatar-wrapper
+    position relative
+    margin-inline-end 1em
+    height 100%
+
+    .player-status
+        position absolute
+        top 92%
+        left 68%
+        font-size 1.25em
+
+td:first-child, th:first-child
+    width 6em
+
+.ratings-table
+    th
+        text-overflow ellipsis
+        overflow hidden
+        max-width 7em
+
+.clickable-rating
+    cursor pointer
+
+    &:hover
+        text-decoration underline
+
+.avatar-upload-label
+    cursor pointer
+    position relative
+    display block
+
+    .avatar-upload-hint
+        position absolute
+        inset 0
+        display flex
+        align-items center
+        justify-content center
+        background rgba(0, 0, 0, 0.45)
+        color #fff
+        font-size 0.75em
+        text-align center
+        clip-path polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%)
+        opacity 0
+        transition opacity 0.15s
+
+    &:hover .avatar-upload-hint
+        opacity 1
+
+.pseudo-heading
+    display flex
+    flex-wrap wrap
+    align-items center
+    column-gap 0.4em
+
+.empty-flag
+    display inline-flex
+    align-items center
+    justify-content center
+    width 1.7em
+    height 1.25em
+    padding 0
+    font-size 0.75em
+    line-height 1
+    color var(--bs-secondary-color)
+    background none
+    border 1px dashed var(--bs-secondary-color)
+    opacity 0.65
+
+    svg
+        font-size 0.8em
+
+    &:hover
+        color var(--bs-primary)
+        border-color var(--bs-primary)
+        opacity 1
+
+.avatar-img
+    width 8em
+    height 6.928em
+    clip-path polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%)
+    object-fit cover
+    padding 0
+</style>

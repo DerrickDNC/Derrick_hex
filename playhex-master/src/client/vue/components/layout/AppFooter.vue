@@ -1,0 +1,84 @@
+<script lang="ts" setup>
+import { IconBookmarks, IconChatDots, IconGithub, IconDiscord } from '../../icons.js';
+import { ref } from 'vue';
+import { seo } from '../../../../shared/app/seo.js';
+import { format } from 'date-fns';
+import i18n from 'i18next';
+import AppLiberapayLink from '../AppLiberapayLink.vue';
+
+const date = ref<string>(LAST_COMMIT_DATE);
+
+i18n.on('languageChanged', () => {
+    date.value = format(new Date(`${LAST_COMMIT_DATE} 12:00:00`), 'd MMM y');
+});
+</script>
+
+<template>
+    <div class="container-fluid py-3 footer bg-body-secondary">
+        <div class="d-flex justify-content-center gap-4">
+            <p>{{ seo.title }}</p>
+        </div>
+        <div class="link-icons d-flex justify-content-center gap-4 text-center">
+            <a href="https://feedback.playhex.org" target="_blank">
+                <IconChatDots class="text-body" />
+                <br>
+                {{ $t('feedback') }}
+            </a>
+            <a href="https://discord.gg/59SJ9KwvVq" target="_blank">
+                <IconDiscord class="text-body" />
+                <br>
+                Discord
+            </a>
+            <a href="https://github.com/playhex/playhex" target="_blank">
+                <IconGithub class="text-body" />
+                <br>
+                GitHub
+            </a>
+            <router-link :to="{ name: 'links' }">
+                <IconBookmarks class="text-body" />
+                <br>
+                {{ $t('hex_links') }}
+            </router-link>
+        </div>
+        <div class="d-flex justify-content-center">
+            <AppLiberapayLink class="mt-4" />
+        </div>
+        <p class="infos">
+            <router-link v-if="date" :to="{ name: 'changelog' }">{{ $t('last_change', { date }) }}</router-link>
+            <router-link :to="{ name: 'tutorial' }">{{ $t('tutorial.label') }}</router-link>
+            <router-link :to="{ name: 'offline-lobby' }">{{ $t('play_offline') }}</router-link>
+            <router-link :to="{ name: 'guide' }">PlayHex guide</router-link>
+            <router-link :to="{ name: 'contribute' }">{{ $t('contribute') }}</router-link>
+            <router-link :to="{ name: 'contributors' }">{{ $t('contributors') }}</router-link>
+            <router-link :to="{ name: 'rescue' }">Rescue page</router-link>
+            <router-link :to="{ name: 'export-games-data' }">Export games data</router-link>
+            <router-link :to="{ name: 'statistics' }">{{ $t('statistics.title') }}</router-link>
+            <a href="https://stats.uptimerobot.com/mJrbJF1nfb" target="_blank">Server status</a>
+            <router-link :to="{ name: 'guide-moderation' }">{{ $t('moderation') }}</router-link>
+            <router-link :to="{ name: 'privacy' }">{{ $t('privacy_policy') }}</router-link>
+            <router-link :to="{ name: 'license' }">{{ $t('license_agpl') }}</router-link>
+        </p>
+    </div>
+</template>
+
+<style lang="stylus" scoped>
+.footer
+    font-size 0.9em
+
+    a
+        color var(--bs-body-color-rgb)
+
+.infos
+    margin 2em 0 0 0
+    text-align center
+
+    display flex
+    flex-wrap wrap
+    justify-content center
+    gap 0.5em 1.5em
+
+.link-icons
+    svg
+        font-size 2em
+        margin 0.25em 0
+</style>

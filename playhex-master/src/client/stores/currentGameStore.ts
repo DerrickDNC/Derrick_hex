@@ -1,0 +1,1330 @@
+import { defineStore, storeToRefs } from 'pinia';
+import Game from '../../shared/app/models/Game.js';
+import { PlayingGameFacade } from '@playhex/pixi-board';
+import { addMove, cancelGame, canExplore, canPlayerUndo, cloneGame, endGame, getPlayer, getPlayerIndex, getPlayers, handleTimeControlUpdate, hasPlayer, isChallengeTargetOf, isPlayerTurn, shouldShowConditionalMoves, toEngineGameData, updateGame } from '../../shared/app/gameUtils.js';
+import useAuthStore from './authStore.js';
+import useSocketStore from './socketStore.js';
+import { computed, onBeforeUnmount, ref, shallowRef, watch, watchEffect } from 'vue';
+import EngineGame from '../../shared/game-engine/EngineGame.js';
+import usePlayerSettingsStore from './playerSettingsStore.js';
+import { GameView } from '@playhex/pixi-board';
+import Rooms from '../../shared/app/Rooms.js';
+import { useRouter } from 'vue-router';
+import Player from '../../shared/app/models/Player.js';
+import { MoveSettings } from '../../shared/app/models/PlayerSettings.js';
+import { timeControlToCadencyName } from '../../shared/app/timeControlUtils.js';
+import { apiGetConditionalMoves, apiPatchConditionalMoves, apiPostAnswerUndo, apiPostAskUndo, apiPostCancel, apiPostResign } from '../apiClient.js';
+import { HexMove, isSpecialHexMove } from '../../shared/move-notation/hex-move-notation.js';
+import { useChatInputStore } from './chatInputStore.js';
+import usePlayerLocalSettingsStore from './playerLocalSettingsStore.js';
+import { playAudio } from '../../shared/app/audioPlayer.js';
+import Premove from '../../shared/app/models/Premove.js';
+import { SimulatePlayingGameFacade } from '@playhex/pixi-board';
+import { canPassAgain } from '../../shared/app/passUtils.js';
+import { createConditionalMovesState, type ConditionalMovesState } from '@playhex/pixi-board';
+import { ConditionalMovesEditor } from '@playhex/pixi-board';
+import { ConditionalMovesFacade } from '@playhex/pixi-board';
+import { PlayerSettingsFacade } from '../services/board-view-facades/PlayerSettingsFacade.js';
+import { Move } from '../../shared/move-notation/move-notation.js';
+import { RichChat } from '../../shared/app/rich-chat.js';
+import ChatMessage from '../../shared/app/models/ChatMessage.js';
+import { GameTimeData } from '../../shared/time-control/TimeControl.js';
+import useServerDateStore from './serverDateStore.js';
+import { notifier } from '../services/notifications/notifier.js';
+import { timeValueToMilliseconds } from '../../shared/time-control/TimeValue.js';
+import useLobbyStore from './lobbyStore.js';
+import { checkShadowDeleted } from '../../shared/app/chatUtils.js';
+import { AnimatorFacade } from '@playhex/pixi-board';
+import { defineOverlay } from '@overlastic/vue';
+import GameFinishedOverlay from '../vue/components/overlay/GameFinishedOverlay.vue';
+import useGameChatSubscriptionsStore from './gameChatSubscriptionsStore.js';
+
+/**
+ * Current remote game I am focused on.
+ *
+ * Store is shared between many parts of the UI that interact with conditional moves:
+ * - game sidebar
+ * - bottom game menu
+ *
+ * When switching to another game, game is unloaded and new game is loaded.
+ * Reloading a game is best way to keep it synchronised and not miss updates.
+ */
+const useCurrentGameStore = defineStore('currentGameStore', () => {
+
+    const { loggedInPlayer } = storeToRefs(useAuthStore());
+    const { playerSettings } = storeToRefs(usePlayerSettingsStore());
+    const { localSettings } = storeToRefs(usePlayerLocalSettingsStore());
+    const router = useRouter();
+    const socketStore = useSocketStore();
+    const { socket } = socketStore;
+
+    const currentGamePublicId = ref<null | string>(null);
+
+    const game = ref<null | Game>(null);
+    const spectators = ref<Player[]>([]);
+
+    const engineGame = shallowRef<null | EngineGame>(null);
+    const gameView = shallowRef<GameView | null>(null);
+    const playingGameFacade = shallowRef<null | PlayingGameFacade>(null);
+    const playerSettingsFacade = shallowRef<null | PlayerSettingsFacade>(null);
+    const simulatePlayingGameFacade = shallowRef<null | SimulatePlayingGameFacade>(null);
+    let animatorFacade: null | AnimatorFacade = null;
+
+    /**
+     * Whether we are in simulation or conditional moves mode.
+     */
+    const gameUIMode = computed<'play' | 'simulation' | 'conditional_moves'>(() => {
+        if (simulatePlayingGameFacade.value) {
+            return 'simulation';
+        }
+
+        if (conditionalMovesFacade.value) {
+            return 'conditional_moves';
+        }
+
+        return 'play';
+    });
+
+    const disableCurrentUIMode = () => {
+        disableSimulationMode();
+        stopConditionalMoves();
+    };
+
+    /**
+     * Whether there is a move in buffer (when move confirmation is enabled).
+     * We should call this callback to send the move when we click "Confirm move".
+     */
+    const confirmMove = ref<null | (() => Promise<void>)>(null);
+
+    const removeConfirmMove = () => {
+        playingGameFacade.value?.removePreviewedMove();
+        confirmMove.value = null;
+    };
+
+    /**
+     * Load a game, listen updates.
+     * Should be called sychronously inside a component so watcher is automatically stopped
+     * when component in unmount.
+     */
+    const useGame = (gamePublicId: string) => {
+        currentGamePublicId.value = gamePublicId;
+
+        const unlisten = listenSocketMessages(gamePublicId, gameInitialData => {
+            game.value = cloneGame(gameInitialData);
+            removeShadowDeletedMessages(game.value);
+            engineGame.value = EngineGame.fromData(toEngineGameData(game.value));
+            gameView.value = new GameView(game.value.boardsize);
+            playerSettingsFacade.value = new PlayerSettingsFacade(gameView.value);
+            playingGameFacade.value = new PlayingGameFacade(
+                gameView.value,
+                engineGame.value.getAllowSwap(),
+                engineGame.value.getMovesHistory().map(moveTimestamped => moveTimestamped.move),
+            );
+
+            listenHexClick();
+            listenHexSecondaryClick();
+            listenModel(playingGameFacade.value, engineGame.value);
+
+            initWinOverlay(engineGame.value, gameView.value, game.value);
+        });
+
+        watchEffect(() => {
+            if (socketStore.connected) {
+                void socketStore.joinRoom(Rooms.game(gamePublicId));
+            }
+        });
+
+        onBeforeUnmount(() => {
+            disposeWinOverlay?.();
+            disableCurrentUIMode();
+            socketStore.leaveRoom(Rooms.game(gamePublicId));
+            unlisten();
+
+            unloadConditionalMoves();
+            removeConfirmMove();
+            simulatePlayingGameFacade.value?.destroy();
+            simulatePlayingGameFacade.value = null;
+            playerSettingsFacade.value?.destroy();
+            playerSettingsFacade.value = null;
+            playingGameFacade.value?.destroy();
+            playingGameFacade.value = null;
+            gameView.value?.destroy();
+            gameView.value = null;
+            engineGame.value = null;
+            game.value = null;
+            currentGamePublicId.value = null;
+            spectators.value = [];
+        });
+    };
+
+    const listenSocketMessages = (gamePublicId: string, onFirstUpdate: (gameInitialData: Game) => void) => {
+        const unlisteners: (() => void)[] = [];
+
+        const on: typeof socket.on = (name: Parameters<typeof socket.on>[0], listener: Parameters<typeof socket.on>[1]) => {
+            unlisteners.push(() => socket.off(name, listener));
+
+            return socket.on(name, listener);
+        };
+
+        on('gameUpdate', (publicId, gameData) => {
+            // ignore if not my game, or already initialized
+            if (publicId !== gamePublicId || game.value !== null) {
+                return;
+            }
+
+            // I received update but game seems not to exists.
+            if (gameData === null) {
+                void router.push({ name: 'home' });
+                return;
+            }
+
+            onFirstUpdate(gameData);
+        });
+
+        on('gameStarted', (gameData) => {
+            if (gamePublicId !== gameData.publicId || !game.value) {
+                return;
+            }
+
+            updateGame(game.value, gameData);
+        });
+
+        on('moved', (gameId, timestampedMove, moveIndex, byPlayerIndex) => {
+            if (gameId !== gamePublicId || !game.value) {
+                return;
+            }
+
+            addMove(game.value, timestampedMove, moveIndex, byPlayerIndex);
+
+            // Do nothing if game not loaded
+            if (!engineGame.value) {
+                return;
+            }
+
+            // Ignore server move because already played locally
+            if (moveIndex <= engineGame.value.getLastMoveIndex()) {
+                return;
+            }
+
+            engineGame.value.move(timestampedMove.move, byPlayerIndex, timestampedMove.playedAt);
+
+            playSoundForMove(timestampedMove.move);
+
+            if (!isSpecialHexMove(timestampedMove.move)) {
+                conditionalMovesEditor.value?.realMovePlayed(timestampedMove.move, byPlayerIndex);
+            }
+        });
+
+        on('timeControlUpdate', (gameId, gameTimeData) => {
+            if (gameId !== gamePublicId || !game.value) {
+                return;
+            }
+
+            handleTimeControlUpdate(game.value, gameTimeData);
+
+            notifyWhenLowTime(gameTimeData);
+        });
+
+        on('askUndo', (gameId, byPlayerIndex) => {
+            if (gameId !== gamePublicId || !game.value) {
+                return;
+            }
+
+            game.value.undoRequest = byPlayerIndex;
+
+            const player = getPlayer(game.value, byPlayerIndex);
+
+            if (!player) {
+                throw new Error('No player at position ' + byPlayerIndex + ', cannot emit notification');
+            }
+
+            notifier.emit('takebackRequested', game.value, player);
+        });
+
+        on('answerUndo', (gameId, accept) => {
+            if (gameId !== gamePublicId || !game.value) {
+                return;
+            }
+
+            if (accept && engineGame.value) {
+                if (game.value.undoRequest === null) {
+                    throw new Error('undo answered but no undo request');
+                }
+
+                engineGame.value.playerUndo(game.value.undoRequest as 0 | 1);
+            }
+
+            const { undoRequest } = game.value;
+
+            game.value.undoRequest = null;
+
+            if (engineGame.value) {
+                game.value.currentPlayerIndex = engineGame.value.getCurrentPlayerIndex();
+                game.value.moves = engineGame.value.getMovesHistory().map(move => move.move);
+                game.value.moveTimestamps = engineGame.value.getMovesHistory().map(move => move.playedAt);
+            }
+
+            if (undoRequest === null) {
+                throw new Error('There was no undo request, cannot emit notification');
+            }
+
+            const takebackPlayer = getPlayer(game.value, undoRequest);
+
+            if (!takebackPlayer) {
+                throw new Error('No player at position ' + undoRequest + ', cannot emit notification');
+            }
+
+            notifier.emit('takebackAnswered', game.value, accept, takebackPlayer);
+        });
+
+        on('cancelUndo', (gameId) => {
+            if (gameId !== gamePublicId || !game.value) {
+                return;
+            }
+
+            game.value.undoRequest = null;
+        });
+
+        on('ended', (gameId, winner, outcome, { date }) => {
+            if (gameId !== gamePublicId || !game.value) {
+                return;
+            }
+
+            endGame(game.value, winner, outcome, date);
+
+            // Do nothing if game not loaded
+            if (engineGame.value === null) {
+                return;
+            }
+
+            // If game is not already ended locally by server response anticipation
+            if (engineGame.value.isEnded()) {
+                return;
+            }
+
+            engineGame.value.declareWinner(winner, outcome, date);
+        });
+
+        on('gameCanceled', (gameId, { date }) => {
+            if (gameId !== gamePublicId || !game.value) {
+                return;
+            }
+
+            cancelGame(game.value, date);
+
+            // Do nothing if game not loaded
+            if (engineGame.value === null) {
+                return;
+            }
+
+            // If game is not already ended locally by server response anticipation
+            if (engineGame.value.isEnded()) {
+                return;
+            }
+
+            engineGame.value.cancel(date);
+        });
+
+        on('rematchAvailable', (gameId, rematchId) => {
+            if (gameId !== gamePublicId || !game.value) {
+                return;
+            }
+
+            const rematch = useLobbyStore().games[rematchId];
+
+            game.value.rematch = rematch;
+
+            notifier.emit('rematchOffer', game.value);
+        });
+
+        on('ratingsUpdated', (gameId, ratings) => {
+            if (gameId !== gamePublicId || !game.value) {
+                return;
+            }
+
+            // Add rating change of this game
+            game.value.ratings = ratings;
+
+            // Update player current rating to update view
+            ratings.forEach(rating => {
+                if (!game.value) {
+                    return;
+                }
+
+                const player = game.value
+                    .gameToPlayers
+                    .find(gameToPlayer => gameToPlayer.player.publicId === rating.player.publicId)
+                    ?.player
+                ;
+
+                if (!player) {
+                    return;
+                }
+
+                player.currentRating = rating;
+            });
+        });
+
+        on('chat', (gameId: string, chatMessage: ChatMessage) => {
+            if (gameId !== gamePublicId || !game.value) {
+                return;
+            }
+
+            if (!checkShadowDeleted(chatMessage, useAuthStore().loggedInPlayer)) {
+                return;
+            }
+
+            game.value.chatMessages.push(chatMessage);
+            richChat.value?.postChatMessage(chatMessage);
+
+            /*
+             * myGamesStore already emits this event for games I play in,
+             * so only emit it here for games I only watch,
+             * otherwise sound and browser notification would be played twice.
+             */
+            if (loggedInPlayer.value === null || !hasPlayer(game.value, loggedInPlayer.value)) {
+                notifier.emit('chatMessage', game.value, chatMessage);
+            }
+
+            // Do not show the unread messages badge on a chat muted on this device
+            if (!isReadingChatMessages.value && !usePlayerLocalSettingsStore().isGameChatMuted(game.value.publicId)) {
+                ++unreadMessages.value;
+            }
+        });
+
+        on('spectatorUpdate', (gameId: string, players: Player[]) => {
+            if (gameId !== gamePublicId) {
+                return;
+            }
+
+            spectators.value = players;
+        });
+
+        on('spectatorJoined', (gameId: string, player: Player) => {
+            if (gameId !== gamePublicId) {
+                return;
+            }
+
+            if (!spectators.value.some(s => s.publicId === player.publicId)) {
+                spectators.value = [...spectators.value, player];
+            }
+        });
+
+        on('spectatorLeft', (gameId: string, player: Player) => {
+            if (gameId !== gamePublicId) {
+                return;
+            }
+
+            spectators.value = spectators.value.filter(s => s.publicId !== player.publicId);
+        });
+
+        return () => {
+            for (const unlisten of unlisteners) {
+                unlisten();
+            }
+        };
+    };
+
+    const listenModel = (playingGameFacade: PlayingGameFacade, engineGame: EngineGame): void => {
+        highlightSidesFromGame();
+
+        engineGame.on('played', move => {
+            playingGameFacade.addMove(move.move);
+            highlightSidesFromGame();
+        });
+
+        engineGame.on('undo', async undoneMovesTimestamped => {
+            const undoneMoves = undoneMovesTimestamped.map(timestampedMove => timestampedMove.move);
+
+            for (let i = 0; i < undoneMoves.length; ++i) {
+                if (i > 0) {
+                    // If two moves are undone, slightly wait between these two moves removal
+                    await new Promise(r => setTimeout(r, 150));
+                }
+
+                if (playingGameFacade.getLastMove() !== undoneMoves[i]) {
+                    throw new Error('undone move is not same as last move');
+                }
+
+                playingGameFacade.undoLastMove();
+                highlightSidesFromGame();
+            }
+        });
+
+        engineGame.on('ended', () => highlightSidesFromGame());
+        engineGame.on('canceled', () => highlightSidesFromGame());
+
+        engineGame.on('updated', () => {
+            playingGameFacade.undoAllMoves();
+
+            for (const timestampedMove of engineGame.getMovesHistory()) {
+                playingGameFacade.addMove(timestampedMove.move);
+            }
+        });
+    };
+
+    const listenHexClick = () => {
+        if (gameView.value === null) {
+            throw new Error('no game view');
+        }
+
+        gameView.value.on('hexClicked', async (move: HexMove) => {
+            if (!game.value || !engineGame.value) {
+                throw new Error('hex clicked but game is null');
+            }
+
+            move = engineGame.value.moveOrSwapPieces(move);
+
+            try {
+                /*
+                 * Simulation
+                 */
+                if (simulatePlayingGameFacade.value) {
+                    if (!loggedInPlayer.value) {
+                        return;
+                    }
+
+                    if (canExplore(game.value, loggedInPlayer.value)) {
+                        simulatePlayingGameFacade.value.addSimulationMoveOrForward(move);
+                    }
+
+                    return;
+                }
+
+                // Watchers cannot do next actions
+                if (localPlayerIndex.value === null) {
+                    return;
+                }
+
+                // Next actions only available when game is playing
+                if (game.value.state !== 'playing') {
+                    return;
+                }
+
+                /*
+                 * Conditional moves
+                 */
+                if (conditionalMovesFacade.value) {
+                    if (isSpecialHexMove(move)) {
+                        throw new Error('Conditional moves do not support swap or pass');
+                    }
+
+                    conditionalMovesFacade.value.clickCell(move);
+                    return;
+                }
+
+                /*
+                 * Premove
+                 */
+                if (MoveSettings.PREMOVE === moveSettings.value && !isMyTurn.value) {
+                    if (engineGame.value.isEnded()) {
+                        return;
+                    }
+
+                    // cancel premove when click on it
+                    if (move === playingGameFacade.value?.getPreviewedMove()) {
+                        await cancelPremove();
+                        playingGameFacade.value?.removePreviewedMove();
+
+                        return;
+                    }
+
+                    if (isSpecialHexMove(move)) {
+                        throw new Error('Unexpected swap-pieces or pass move here');
+                    }
+
+                    if (engineGame.value.getBoard().isEmpty(move)) {
+                        // set or replace premove
+                        sendPremove(move).catch(reason => {
+                            playingGameFacade.value?.removePreviewedMove();
+                            throw reason;
+                        });
+                        playingGameFacade.value?.setPreviewedMove(move, localPlayerIndex.value);
+                    } else if (playingGameFacade.value?.hasPreviewedMove()) {
+                        // cancel premove when click on occupied cell
+                        await cancelPremove();
+                        playingGameFacade.value?.removePreviewedMove();
+                    }
+
+                    return;
+                }
+
+                engineGame.value.checkMove(move, localPlayerIndex.value);
+
+                // Send move if move preview is not enabled
+                if (!shouldDisplayConfirmMove.value) {
+                    engineGame.value.move(move, localPlayerIndex.value);
+                    await sendMove(move);
+                    return;
+                }
+
+                // Cancel move preview if I click on it
+                const previewedMove = playingGameFacade.value?.getPreviewedMove();
+
+                if (previewedMove === move) {
+                    removeConfirmMove();
+                    return;
+                }
+
+                // Buffer move sending: will be sent later, when click on "Confirm move"
+                confirmMove.value = async () => {
+                    if (localPlayerIndex.value === null || !engineGame.value) {
+                        throw new Error('game or localPlayerIndex is now null');
+                    }
+
+                    removeConfirmMove();
+                    engineGame.value.move(move, localPlayerIndex.value);
+
+                    await sendMove(move);
+                };
+
+                playingGameFacade.value?.setPreviewedMove(move, localPlayerIndex.value);
+            } catch (e) {
+                // noop
+            }
+        });
+    };
+
+    /**
+     * Ctrl+hex click to paste coords in chat
+     * (long press on mobile)
+     */
+    const listenHexSecondaryClick = () => {
+        if (!gameView.value) {
+            throw new Error('no game view');
+        }
+
+        gameView.value.on('hexClickedSecondary', move => {
+            pasteCoordsInChat(move);
+        });
+    };
+
+    const highlightSidesFromGame = (): void => {
+        if (!engineGame.value || !gameView.value) {
+            return;
+        }
+
+        if (engineGame.value.isCanceled()) {
+            gameView.value.highlightSides(true, true);
+            return;
+        }
+
+        if (engineGame.value.isEnded()) {
+            gameView.value.highlightSideForPlayer(engineGame.value.getStrictWinner());
+            return;
+        }
+
+        gameView.value.highlightSideForPlayer(engineGame.value.getCurrentPlayerIndex());
+    };
+
+    /**
+     * Returns 0 if currently logged in player is red on this game, or 1 if blue.
+     * Returns null if player is a watcher.
+     */
+    const localPlayerIndex = computed<null | 0 | 1>(() => {
+        if (loggedInPlayer.value === null || !game.value) {
+            return null;
+        }
+
+        const playerIndex = getPlayerIndex(game.value, loggedInPlayer.value);
+
+        if (playerIndex === -1) {
+            return null;
+        }
+
+        return playerIndex as 0 | 1;
+    });
+
+    const players = computed<Player[]>(() => {
+        if (game.value === null) {
+            return [];
+        }
+
+        return getPlayers(game.value);
+    });
+
+    const isMyTurn = computed(() => {
+        if (game.value === null) {
+            return false;
+        }
+
+        return isPlayerTurn(game.value, loggedInPlayer.value);
+    });
+
+    /**
+     * Returns current MoveSettings for this player settings and this game time control cadency.
+     * MoveSettings is whether we should submit move immediately or ask confirm.
+     */
+    const moveSettings = computed<null | MoveSettings>(() => {
+        if (game.value === null || playerSettings.value === null) {
+            return null;
+        }
+
+        return {
+            blitz: playerSettings.value.moveSettingsBlitz,
+            normal: playerSettings.value.moveSettingsNormal,
+            correspondence: playerSettings.value.moveSettingsCorrespondence,
+        }[timeControlToCadencyName(game.value)];
+    });
+
+    // Remove premove or move confirmation when changing player settings
+    watch(moveSettings, async (_, oldSettings) => {
+        if (oldSettings === MoveSettings.MUST_CONFIRM) {
+            removeConfirmMove();
+        }
+
+        if (oldSettings === MoveSettings.PREMOVE) {
+            if (playingGameFacade.value?.hasPreviewedMove()) {
+                await cancelPremove();
+                removeConfirmMove();
+            }
+        }
+    });
+
+    /**
+     * Whether we should show the "Confirm move" button.
+     * The button then should be disabled or enabled depending
+     * on whether there is a pre-selected move to submit or not.
+     */
+    const shouldDisplayConfirmMove = computed<boolean>(() => {
+        if (game.value === null) {
+            return false;
+        }
+
+        // I am watcher
+        if (localPlayerIndex.value === null) {
+            return false;
+        }
+
+        // Game has ended. Still display button when game is not yet started to make sure it works
+        if (game.value.state === 'ended') {
+            return false;
+        }
+
+        return moveSettings.value === MoveSettings.MUST_CONFIRM;
+    });
+
+    /*
+     * Play move
+     */
+
+    const playSoundForMove = (move: HexMove): void => {
+        if (localSettings.value.muteAudio) return;
+        playAudio(move === 'pass'
+            ? '/sounds/lisp/Check.ogg'
+            : '/sounds/lisp/Move.ogg',
+        );
+    };
+
+    const sendMove = async (move: HexMove): Promise<void> => {
+        return await new Promise((resolve, reject) => {
+            if (!game.value) {
+                throw new Error('no game');
+            }
+
+            socket.emit('move', game.value.publicId, move, answer => {
+                if (answer === true) {
+                    resolve();
+                    return;
+                }
+
+                reject(new Error(answer));
+            });
+
+            playSoundForMove(move);
+        });
+    };
+
+    /*
+     * Pass
+     */
+
+    const sendPass = async () => {
+        if (localPlayerIndex.value === null || !engineGame.value) {
+            return;
+        }
+
+        engineGame.value.move('pass', localPlayerIndex.value);
+        await sendMove('pass');
+    };
+
+    const shouldShowPass = computed((): boolean => {
+        if (!game.value) {
+            return false;
+        }
+
+        return game.value.state === 'playing'
+            && localPlayerIndex.value !== null
+        ;
+    });
+
+    const shouldEnablePass = computed((): boolean => {
+        if (!game.value || !engineGame.value) {
+            return false;
+        }
+
+        return game.value.state === 'playing'
+            && isMyTurn.value
+            && canPassAgain(engineGame.value)
+        ;
+    });
+
+    /*
+     * Resign
+     */
+
+    const canResign = computed((): boolean => {
+        if (localPlayerIndex.value === null || !game.value) {
+            return false;
+        }
+
+        return game.value.state === 'playing';
+    });
+
+    const sendResign = async (): Promise<string | true> => {
+        if (!game.value) {
+            throw new Error('no game');
+        }
+
+        return await apiPostResign(game.value.publicId);
+    };
+
+    /*
+     * Premove
+     */
+
+    const sendPremove = async (move: HexMove): Promise<void> => {
+        if (!engineGame.value) {
+            throw new Error('Cannot premove next move, needs game to know which is next move index');
+        }
+
+        const premove = new Premove();
+
+        premove.move = move;
+        premove.moveIndex = engineGame.value.getLastMoveIndex() + 2;
+
+        return await new Promise((resolve, reject) => {
+            if (!game.value) {
+                throw new Error('no game');
+            }
+
+            socket.emit('premove', game.value.publicId, premove, answer => {
+                if (answer === true) {
+                    resolve();
+                    return;
+                }
+
+                reject(new Error(answer));
+            });
+        });
+    };
+
+    const cancelPremove = async (): Promise<void> => {
+        return await new Promise((resolve, reject) => {
+            if (!game.value) {
+                throw new Error('no game');
+            }
+
+            socket.emit('cancelPremove', game.value.publicId, answer => {
+                if (answer === true) {
+                    resolve();
+                    return;
+                }
+
+                reject(new Error(answer));
+            });
+        });
+    };
+
+    /*
+     * Undo move
+     */
+
+    /**
+     * Whether the "Takeback button" should be displayed in the menu,
+     * disabled or not.
+     */
+    const shouldDisplayUndoMove = computed<boolean>(() => {
+        if (game.value === null || playerSettings.value === null) {
+            return false;
+        }
+
+        // I am watcher
+        if (localPlayerIndex.value === null) {
+            return false;
+        }
+
+        if (game.value.state !== 'playing') {
+            return false;
+        }
+
+        // Show a disabled button if I sent an undo request,
+        // but hide it if opponent sent an undo request.
+        if (game.value.undoRequest === (1 - localPlayerIndex.value)) {
+            return false;
+        }
+
+        return true;
+    });
+
+    /**
+     * Whether we should enable the button because cannot undo now
+     */
+    const shouldEnableUndoMove = computed<boolean>(() => {
+        if (!game.value || localPlayerIndex.value === null || !engineGame.value) {
+            return false;
+        }
+
+        return game.value.undoRequest !== localPlayerIndex.value
+            && canPlayerUndo(game.value, localPlayerIndex.value)
+        ;
+    });
+
+    /**
+     * Whether we should display "Accept" or "Reject" opponent takeback request.
+     */
+    const shouldDisplayAnswerUndoMove = computed<boolean>(() => {
+        if (!game.value || localPlayerIndex.value === null) {
+            return false;
+        }
+
+        if (game.value.state !== 'playing') {
+            return false;
+        }
+
+        return game.value.undoRequest === 1 - localPlayerIndex.value;
+    });
+
+    const askUndo = async () => {
+        if (!game.value) {
+            return;
+        }
+
+        return await apiPostAskUndo(game.value.publicId);
+    };
+
+    const answerUndo = async (accept: boolean) => {
+        if (!game.value) {
+            return;
+        }
+
+        return await apiPostAnswerUndo(game.value.publicId, accept);
+    };
+
+    /*
+     * Chat
+     */
+
+    /**
+     * Chat messages, but with more information
+     * to improve readability, like date when day change,
+     * clickable move when message is posted...
+     */
+    const richChat = ref<null | RichChat>(null);
+
+    /**
+     * Number of unread messages.
+     * Front side only (if we refresh, we lose the unread message),
+     * should be stored server side.
+     */
+    const unreadMessages = ref(0);
+
+    /**
+     * Whether chat is open.
+     * Must be set to true so unreadMessages won't increment,
+     * and prevent showing (1) when we are already reading chat.
+     */
+    const isReadingChatMessages = ref(false);
+
+    watch(game, () => {
+        richChat.value = game.value
+            ? new RichChat(game.value)
+            : null
+        ;
+    });
+
+    // Clear unreadMessages when player opens chat
+    watch(isReadingChatMessages, () => {
+        if (isReadingChatMessages.value) {
+            unreadMessages.value = 0;
+        }
+    });
+
+    const sendChatMessage = async (content: string): Promise<void> => {
+        return await new Promise((resolve, reject) => {
+            if (!game.value) {
+                throw new Error('no game');
+            }
+
+            socket.emit('sendChat', game.value.publicId, content, error => {
+                if (error) {
+                    useSocketStore().handleMessageError(error, 'could not post message, server error');
+                    reject(new Error(error.reason));
+                    return;
+                }
+
+                // Posting in a game chat subscribes me to it, server side
+                useGameChatSubscriptionsStore().markSubscribedAfterPost(game.value!);
+
+                resolve();
+            });
+        });
+    };
+
+    /**
+     * Just paste coords in chat.
+     * Will be transformed to clickable coords later.
+     */
+    const pasteCoordsInChat = (move: Move) => {
+        if (!game.value) {
+            throw new Error('Cannot past coords in chat, no game');
+        }
+
+        const chatInput = useChatInputStore().getChatInput(game.value.publicId);
+
+        if (chatInput.value.length > 0 && !chatInput.value.match(/\s$/)) {
+            chatInput.value += ' ';
+        }
+
+        chatInput.value += move + ' ';
+    };
+
+    /**
+     * On init, remove shadow banned chat messages
+     */
+    const removeShadowDeletedMessages = (game: Game): void => {
+        // Append '#unban' to the url and refresh to see shadow banned chat messages
+        if (window.location.hash === '#unban') {
+            return;
+        }
+
+        const { loggedInPlayer } = useAuthStore();
+
+        game.chatMessages = game.chatMessages
+            .filter(chatMessage => checkShadowDeleted(chatMessage, loggedInPlayer))
+        ;
+    };
+
+    /*
+     * Cancel
+     */
+
+    const canCancel = computed((): boolean => {
+        if (localPlayerIndex.value === null || game.value === null) {
+            return false;
+        }
+
+        return game.value.state !== 'canceled'
+            && game.value.state !== 'ended'
+            && game.value.moves.length < 2
+        ;
+    });
+
+    /**
+     * Whether I'm the target of a nominative challenge I have not joined yet,
+     * and can decline it.
+     */
+    const canDeclineChallenge = computed((): boolean => {
+        if (game.value === null) {
+            return false;
+        }
+
+        return isChallengeTargetOf(game.value, loggedInPlayer.value);
+    });
+
+    const sendCancel = async (): Promise<string | true> => {
+        if (!game.value) {
+            throw new Error('unexpected no game');
+        }
+
+        return await apiPostCancel(game.value.publicId);
+    };
+
+    /*
+     * Rematch
+     */
+    const canRematch = computed<boolean>(() => {
+        if (localPlayerIndex.value === null) {
+            return false;
+        }
+
+        if (!game.value) {
+            return false;
+        }
+
+        return (game.value.state === 'ended'
+            || game.value.state === 'canceled')
+            && game.value.rematch == null;
+    });
+
+    /*
+     * Simulation
+     */
+    const enableSimulationMode = (): SimulatePlayingGameFacade => {
+        if (gameUIMode.value === 'simulation' && simulatePlayingGameFacade.value) {
+            return simulatePlayingGameFacade.value;
+        }
+
+        disableCurrentUIMode();
+
+        if (!playingGameFacade.value) {
+            throw new Error('Cannot enable simulation mode, no playingGameFacade');
+        }
+
+        if (gameUIMode.value !== 'play') {
+            throw new Error('Cannot enable simulation mode, disable other mode first');
+        }
+
+        removeConfirmMove();
+        simulatePlayingGameFacade.value = new SimulatePlayingGameFacade(playingGameFacade.value);
+
+        animatorFacade?.hideAnimatePathMarks();
+
+        return simulatePlayingGameFacade.value;
+    };
+
+    const disableSimulationMode = (): void => {
+        if (!simulatePlayingGameFacade.value) {
+            return;
+        }
+
+        simulatePlayingGameFacade.value.destroy();
+        simulatePlayingGameFacade.value = null;
+
+        animatorFacade?.showAnimatePathMarks();
+    };
+
+    /**
+     * Win overlay and animation
+     */
+    let disposeWinOverlay: null | (() => void) = null;
+
+    const initWinOverlay = (engineGame: EngineGame, gameView: GameView, game: Game) => {
+        if (disposeWinOverlay) {
+            disposeWinOverlay();
+            disposeWinOverlay = null;
+        }
+
+        let disposed = false;
+
+        const endedCallback = async () => {
+            if (disposed) {
+                return;
+            }
+
+            const winningPath = engineGame.getBoard().getShortestWinningPath();
+
+            if (winningPath) {
+                animatorFacade = new AnimatorFacade(gameView);
+                await animatorFacade.animatePath(winningPath);
+
+                if (disposed) {
+                    return;
+                }
+            }
+
+            await defineOverlay(GameFinishedOverlay)({
+                engineGame,
+                players: game.gameToPlayers
+                    .map(gameToPlayer => gameToPlayer.player)
+                ,
+            });
+        };
+
+        engineGame.on('ended', endedCallback);
+        engineGame.on('canceled', endedCallback);
+
+        disposeWinOverlay = () => {
+            disposed = true;
+            engineGame.off('ended', endedCallback);
+            engineGame.off('canceled', endedCallback);
+            animatorFacade = null;
+        };
+    };
+
+    /*
+     * Conditional moves
+     */
+
+    /**
+     * Defined as soon as there is a player, and he is playing this game.
+     * Needed even when not in conditional moves mode
+     * because we want to show for example whether there are currently active conditional moves.
+     */
+    const conditionalMovesState = ref<null | ConditionalMovesState>(null);
+
+    /**
+     * Initialized when state is loaded.
+     * Only a set of methods around this state.
+     */
+    const conditionalMovesEditor = shallowRef<null | ConditionalMovesEditor>(null);
+
+    /**
+     * Defined only when in conditional moves mode, detroyed when we leave it.
+     * Updates view when editor does actions.
+     * Used to know whether we are in conditional moves mode too.
+     */
+    const conditionalMovesFacade = shallowRef<null | ConditionalMovesFacade>(null);
+
+    /**
+     * When leaving game and this store is resetting,
+     * destroy conditional moves.
+     */
+    const unloadConditionalMoves = () => {
+        conditionalMovesFacade.value?.destroy();
+        conditionalMovesFacade.value = null;
+        conditionalMovesEditor.value = null;
+        conditionalMovesState.value = null;
+    };
+
+    watch([loggedInPlayer, localPlayerIndex], async () => {
+        if (!game.value || !loggedInPlayer.value || localPlayerIndex.value === null) {
+            stopConditionalMoves();
+            conditionalMovesEditor.value = null;
+            conditionalMovesState.value = null;
+            return;
+        }
+
+        if (!shouldShowConditionalMoves(game.value, loggedInPlayer.value)) {
+            return;
+        }
+
+        const conditionalMoves = await apiGetConditionalMoves(game.value.publicId);
+
+        conditionalMovesState.value = createConditionalMovesState(
+            localPlayerIndex.value,
+            {
+                tree: conditionalMoves.tree,
+                unplayedLines: conditionalMoves.unplayedLines,
+            },
+        );
+
+        conditionalMovesEditor.value = new ConditionalMovesEditor(conditionalMovesState.value);
+
+        conditionalMovesEditor.value.on('conditionalMovesSubmitted', async conditionalMoves => {
+            if (!game.value) {
+                throw new Error('Cannot patch conditional moves, no game');
+            }
+
+            await apiPatchConditionalMoves(game.value.publicId, conditionalMoves);
+        });
+    });
+
+    const startConditionalMoves = (): ConditionalMovesFacade => {
+        if (conditionalMovesFacade.value) {
+            return conditionalMovesFacade.value;
+        }
+
+        disableCurrentUIMode();
+
+        if (gameUIMode.value !== 'play') {
+            throw new Error('Cannot enable conditional moves mode, disable other mode first');
+        }
+
+        if (!playingGameFacade.value) {
+            throw new Error('Cannot enable conditional moves edition, no playingGameFacade');
+        }
+
+        if (!conditionalMovesEditor.value) {
+            throw new Error('Cannot enable conditional moves edition, no editor');
+        }
+
+        removeConfirmMove();
+        conditionalMovesFacade.value = new ConditionalMovesFacade(playingGameFacade.value, conditionalMovesEditor.value);
+
+        return conditionalMovesFacade.value;
+    };
+
+    const stopConditionalMoves = () => {
+        if (!conditionalMovesFacade.value) {
+            return;
+        }
+
+        conditionalMovesFacade.value.destroy();
+        conditionalMovesFacade.value = null;
+    };
+
+    /*
+     * Low time notification
+     */
+    let lowTimeNotificationThread: null | NodeJS.Timeout = null;
+
+    const resetLowTimeNotificationThread = (): void => {
+        if (lowTimeNotificationThread !== null) {
+            clearTimeout(lowTimeNotificationThread);
+            lowTimeNotificationThread = null;
+        }
+    };
+
+    const notifyWhenLowTime = (gameTimeData: GameTimeData): void => {
+        resetLowTimeNotificationThread();
+
+        const { players, currentPlayer } = gameTimeData;
+        const { totalRemainingTime } = players[currentPlayer];
+
+        if (!(totalRemainingTime instanceof Date)) {
+            return;
+        }
+
+        const serverDate = useServerDateStore().newDate();
+
+        lowTimeNotificationThread = setTimeout(() => {
+            if (!game.value) {
+                return;
+            }
+
+            notifier.emit('gameTimeControlWarning', game.value);
+        }, timeValueToMilliseconds(totalRemainingTime, serverDate) - 10000);
+    };
+
+
+    return {
+        game,
+        engineGame,
+        gameView,
+        gameUIMode,
+        playingGameFacade,
+        playerSettingsFacade,
+
+        players,
+        localPlayerIndex,
+        isMyTurn,
+        moveSettings,
+        shouldDisplayConfirmMove,
+        confirmMove,
+        shouldDisplayUndoMove,
+        shouldEnableUndoMove,
+        shouldDisplayAnswerUndoMove,
+        shouldShowPass,
+        shouldEnablePass,
+        canResign,
+        richChat,
+        unreadMessages,
+        isReadingChatMessages,
+        canCancel,
+        canDeclineChallenge,
+        canRematch,
+        spectators,
+        conditionalMovesEditor,
+        conditionalMovesState,
+        simulatePlayingGameFacade,
+
+        useGame,
+
+        askUndo,
+        answerUndo,
+        sendMove,
+        sendPremove,
+        cancelPremove,
+        sendPass,
+        sendResign,
+        sendCancel,
+        enableSimulationMode,
+        disableSimulationMode,
+        startConditionalMoves,
+        stopConditionalMoves,
+        sendChatMessage,
+    };
+});
+
+export default useCurrentGameStore;

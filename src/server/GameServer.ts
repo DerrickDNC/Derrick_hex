@@ -1,0 +1,1149 @@
+import { EngineGame, IllegalMove, PlayerIndex } from '../shared/game-engine/index.js';
+import { CancelGameReason, GameState } from '../shared/app/Types.js';
+import { ChatMessage, Player, GameToPlayer, Game, Premove } from '../shared/app/models/index.js';
+import { bindTimeControlToGame } from '../shared/app/bindTimeControlToGame.js';
+import { HexServer } from './server.js';
+import baseLogger from './services/logger.js';
+import { AbstractTimeControl } from '../shared/time-control/TimeControl.js';
+import { createTimeControl } from '../shared/time-control/createTimeControl.js';
+import { canPassAgain } from '../shared/app/passUtils.js';
+import { Container } from 'typedi';
+import { TypedEmitter } from 'tiny-typed-emitter';
+import { makeAIPlayerMove } from './services/AIManager.js';
+import { recreateTimeControlAfterUndo } from '../shared/app/recreateTimeControlFromGame.js';
+import ConditionalMovesRepository from './repositories/ConditionalMovesRepository.js';
+import { timeControlToCadencyName } from '../shared/app/timeControlUtils.js';
+import { notifier } from './services/notifications/index.js';
+import { AutoSaveInterface } from './auto-save/AutoSaveInterface.js';
+import { TimestampedMove, Outcome } from '../shared/game-engine/Types.js';
+import { pseudoString } from '../shared/app/pseudoUtils.js';
+import { errorToLogger, errorToString } from '../shared/app/utils.js';
+import { assignEngineGameData, conditionalMovesEnabledForCadencies, isBotGame, isChallengeTargetOf, toEngineGameData } from '../shared/app/gameUtils.js';
+import type { HexMove } from '../shared/move-notation/hex-move-notation.js';
+import { GameEventsEmitter } from './services/game-events-emitter/GameEventsEmitter.js';
+
+type GameEvents = {
+    played: () => void;
+    ended: () => void;
+    canceled: () => void;
+    chat: () => void;
+};
+
+/**
+ * Contains a game state,
+ * mutate this, and notify obervers in the room.
+ * Re-emits some game event.
+ *
+ * Can, and should be persisted for following purposes:
+ *  - once created, to have an gameId and persist relations (e.g correspondence moves)
+ *  - archive games once finished (in database)
+ *  - before server restart (probably not applicable for blitz. Redis should be suffisant, as optional)
+ *  - at intervals to prevent game data loss on server crash (for long games, still playing but no players activity. Redis should be suffisant, as optional)
+ *  - someone create a correspondence game then logout: game should not be lost (on game create)
+ *  - tournament games: should be persisted more often (every move)
+ *
+ * Persisting is done on repository.
+ *
+ * Most of games should be played only in memory,
+ * and persisted only on game finished.
+ * Unless server restart, a player become temporarly inactive, or correspondace game.
+ */
+export default class GameServer extends TypedEmitter<GameEvents>
+{
+    /**
+     * Null if not yet started, or ended and reloaded from database
+     */
+    private engineGame: null | EngineGame = null;
+
+    /**
+     * Players waiting in lobby including host,
+     * then when game is playing, players are ordered.
+     */
+    private players: Player[] = [];
+
+    private timeControl: AbstractTimeControl;
+
+    /**
+     * Players premoves, for live games.
+     */
+    private premoves: [null | Premove, null | Premove] = [null, null];
+
+    /**
+     * Reason of the next cancelation, set just before calling this.engineGame.cancel()
+     * or doCancel(), and consumed by the "canceled" game event listener / doCancel().
+     */
+    private pendingCancelReason: null | CancelGameReason = null;
+
+    private io: HexServer = Container.get(HexServer);
+
+    private logger = baseLogger;
+
+    constructor(
+        private game: Game,
+        private autoSave: AutoSaveInterface<Game>,
+        private gameEventEmitter: GameEventsEmitter = Container.get(GameEventsEmitter),
+    ) {
+        super();
+
+        this.createChildLogger();
+        this.init();
+    }
+
+    private init(): void
+    {
+        this.players = this.game.gameToPlayers
+            .sort((a, b) => a.order - b.order)
+            .map(h => h.player)
+        ;
+
+        try {
+            this.timeControl = createTimeControl(
+                this.game.timeControlType,
+                this.game.timeControl,
+            );
+        } catch (e) {
+            baseLogger.error('Could not recreate time control instance from persisted data', {
+                ...errorToLogger(e),
+                gamePublicId: this.game.publicId,
+                game: this.game,
+            });
+
+            throw e;
+        }
+
+        if (this.game.startedAt) {
+            try {
+                this.engineGame = EngineGame.fromData(toEngineGameData(this.game));
+                this.listenEngineGame(this.engineGame);
+            } catch (e) {
+                baseLogger.error('Could not recreate game from data', { data: this.game });
+                throw e;
+            }
+        }
+
+        if (this.engineGame !== null) {
+            this.bindTimeControl();
+            this.makeAutomatedMoves().catch(e => {
+                this.logger.error('Error in init, while makeAutomatedMoves()', errorToLogger(e));
+            });
+        }
+    }
+
+    /**
+     * To call on new instance, to add context in game logs.
+     */
+    private createChildLogger()
+    {
+        const { publicId } = this.game;
+
+        if (typeof publicId !== 'string') {
+            throw new Error('game publicId must be defined');
+        }
+
+        this.logger = baseLogger.child({
+            gamePublicId: publicId,
+        });
+    }
+
+    getPublicId(): string
+    {
+        return this.game.publicId;
+    }
+
+    getEngineGame(): null | EngineGame
+    {
+        return this.engineGame;
+    }
+
+    getPlayers(): Player[]
+    {
+        return this.players;
+    }
+
+    getPlayerByPublicId(publicId: string): null | Player
+    {
+        return this.players
+            .find(player => player.publicId === publicId)
+            ?? null
+        ;
+    }
+
+    getPlayerIndex(player: Player): null | 0 | 1
+    {
+        const index = this.players.findIndex(p => p.publicId === player.publicId);
+
+        if (index < 0) {
+            return null;
+        }
+
+        return index as 0 | 1;
+    }
+
+    getState(): GameState
+    {
+        return this.game.state;
+    }
+
+    /**
+     * Check whether there is an automated move to play
+     * as soon as a it is a player turn.
+     *
+     * An automated move can be:
+     * - AI move
+     * - Conditional move
+     */
+    private async makeAutomatedMoves(): Promise<void>
+    {
+        this.makePremoveIfApplicable();
+        await this.makeAIMoveIfApplicable();
+        await this.makeConditionalMovesIfApplicable();
+    }
+
+    private makePremoveIfApplicable()
+    {
+        if (this.engineGame === null) {
+            return;
+        }
+
+        if (this.engineGame.isEnded()) {
+            return;
+        }
+
+        const premove = this.premoves[this.engineGame.getCurrentPlayerIndex()];
+
+        if (premove === null) {
+            return;
+        }
+
+        // Ignore premove if it was for a previous move
+        if (premove.moveIndex !== this.engineGame.getLastMoveIndex() + 1) {
+            this.logger.notice('Premove ignored because not for current index', { premove, lastMoveIndex: this.engineGame.getLastMoveIndex() });
+            this.premoves[this.engineGame.getCurrentPlayerIndex()] = null;
+            return;
+        }
+
+        this.logger.info('Play premove', { premove });
+
+        this.premoves[this.engineGame.getCurrentPlayerIndex()] = null; // Must reset premove before playerMove(), else getCurrentPlayerIndex() will point to other player
+
+        const player = this.players[this.engineGame.getCurrentPlayerIndex()];
+        const result = this.playerMove(player, premove.move);
+
+        if (result !== true) {
+            this.logger.error('Could not play premove', { result });
+        }
+    }
+
+    /**
+     * Should be called when player turn changed.
+     * Check whether current player is a bot player, and request an AI move if true.
+     */
+    private async makeAIMoveIfApplicable(): Promise<void>
+    {
+        if (this.engineGame === null) {
+            return;
+        }
+
+        const player = this.players[this.engineGame.getCurrentPlayerIndex()];
+
+        if (!player.isBot) {
+            return;
+        }
+
+        try {
+            const boardPosition = this.engineGame.getMovesHistoryAsString();
+            const move = await makeAIPlayerMove(player, this);
+
+            // Player canceled or resigned while ai was processing, do nothing.
+            if (this.engineGame.isEnded()) {
+                return;
+            }
+
+            // Ignore, board position has changed while AI was computing. Occurs when move has been undone.
+            if (this.engineGame.getMovesHistoryAsString() !== boardPosition) {
+                this.logger.info('Board position changed while AI was computing, ignoring AI move');
+                return;
+            }
+
+            if (move === null) {
+                this.playerResign(player);
+                return;
+            }
+
+            const result = this.playerMove(player, move);
+
+            if (result !== true) {
+                this.logger.error('Bot tried to move but get an error', { result });
+                this.playerResign(player);
+            }
+        } catch (e) {
+            if (e instanceof IllegalMove) {
+                this.logger.error('From makeAIMoveIfApplicable(): an AI played an illegal move', { err: e.message, slug: player.slug });
+            } else {
+                this.logger.error('From makeAIMoveIfApplicable(): an AI thrown an error', { ...errorToLogger(e), slug: player.slug });
+            }
+
+            this.playerResign(player);
+        }
+    }
+
+    /**
+     * If current player has valid conditional move, play it.
+     */
+    private async makeConditionalMovesIfApplicable(): Promise<void>
+    {
+        // Do not lose time querying database for conditional moves if game is not correspondence
+        if (!conditionalMovesEnabledForCadencies.includes(timeControlToCadencyName(this.game))) {
+            return;
+        }
+
+        if (this.engineGame === null) {
+            return;
+        }
+
+        const lastMove = this.engineGame.getLastMove();
+
+        if (lastMove === null) {
+            return;
+        }
+
+        try {
+            this.logger.info('Conditional moves: checking', { lastMove });
+
+            const player = this.players[this.engineGame.getCurrentPlayerIndex()];
+            const conditionalMovesRepository = Container.get(ConditionalMovesRepository);
+
+            const move = await conditionalMovesRepository.shift(player, this.game, lastMove.move);
+
+            if (move === null) {
+                this.logger.info('Conditional moves: no conditional move.', { lastMove });
+                return;
+            }
+
+            this.logger.info('Conditional moves: conditional move matched.', { lastMove, move });
+
+            // Game has ended, either win, or opponent resigned while fetching conditional move
+            if (this.engineGame.isEnded()) {
+                return;
+            }
+
+            const result = this.playerMove(player, move);
+
+            if (result !== true) {
+                this.logger.error('Could not play conditional move', { result });
+            }
+        } catch (e) {
+            this.logger.warning('Error while checking conditional moves, ignoring.', errorToLogger(e));
+        }
+    }
+
+    /**
+     * In player vs bot game, returns last player move.
+     * Returns null if player has not yet played, or if this is bot vs bot.
+     */
+    private getLastPlayerMove(): null | TimestampedMove
+    {
+        if (this.engineGame === null) {
+            return null;
+        }
+
+        const movesHistory = this.engineGame.getMovesHistory();
+        let i = movesHistory.length - 1;
+
+        if (i < 0) {
+            return null;
+        }
+
+        if (this.players[i % 2].isBot) {
+            --i;
+
+            if (i < 0 || this.players[i % 2].isBot) {
+                return null;
+            }
+        }
+
+        return movesHistory[i];
+    }
+
+    /**
+     * Should be called after ask undo.
+     * Check if opponent is a bot, and let bot make a decision to accept or reject player's undo request.
+     * On ranked games, bot should only accept undo on misclicks.
+     * On friendly games, bot should accept any undo to let player try another line.
+     */
+    private async makeAIAnswerUndoIfApplicable(): Promise<void>
+    {
+        if (this.game === null || this.engineGame === null || this.game.state !== 'playing' || typeof this.game.undoRequest !== 'number') {
+            return;
+        }
+
+        const player = this.players[1 - this.game.undoRequest];
+
+        if (!player.isBot) {
+            return;
+        }
+
+        const { ranked } = this.game;
+
+        if (!ranked) {
+            this.playerAnswerUndo(player, true);
+            return;
+        }
+
+        const lastPlayerMove = this.getLastPlayerMove();
+
+        if (lastPlayerMove === null) {
+            this.logger.warning('Could not get last player move to make decision on undo request');
+            return;
+        }
+
+        // On ranked, bot accepts undo only if player ask undo quickly after misclick.
+        if (new Date().getTime() < (lastPlayerMove.playedAt.getTime() + 2000)) {
+            this.playerAnswerUndo(player, true);
+        } else {
+            // else, bot reject undo request to show that bot is reactive to undo requests.
+            // Wait to prevent being instant and show the undo button does something.
+            await new Promise(r => setTimeout(r, 500));
+            this.playerAnswerUndo(player, false);
+        }
+    }
+
+    private listenEngineGame(engineGame: EngineGame): void
+    {
+        /**
+         * Listen on played event, move can come from AI
+         */
+        engineGame.on('played', (timestampedMove, moveIndex, byPlayerIndex) => {
+            this.saveState();
+
+            this.gameEventEmitter.emitMoved(this.game, timestampedMove, moveIndex, byPlayerIndex);
+            this.gameEventEmitter.emitTimeControlUpdate(this.game, this.timeControl);
+
+            if (!engineGame.isEnded()) {
+                this.makeAutomatedMoves().catch(e => {
+                    this.logger.error('Game played event: error in makeAutomatedMoves()', errorToLogger(e));
+                });
+            }
+
+            this.cancelUndoRequestIfAny(byPlayerIndex);
+            this.emit('played');
+
+            if (!engineGame.isEnded()) {
+                notifier.emit('move', this.game, timestampedMove);
+            }
+        });
+
+        /**
+         * Listen on ended event, can come from game that turned into a winning position,
+         * or time control that elapsed and made a winner.
+         */
+        engineGame.on('ended', (winner, outcome, date) => {
+            this.saveState();
+
+            this.doEnd(winner, outcome, date);
+        });
+
+        /**
+         * Listen on canceled event, can come from game timed out with less than 2 moves,
+         * or player canceled because nobody joined.
+         */
+        engineGame.on('canceled', (date) => {
+            this.saveState();
+
+            this.logger.info('Game canceled.');
+            this.doCancel(date, this.pendingCancelReason);
+        });
+    }
+
+    private doEnd(winner: PlayerIndex, outcome: Outcome, date: Date): void
+    {
+        this.game.state = 'ended';
+        this.game.outcome = outcome;
+
+        this.gameEventEmitter.emitGameEnded(this.game, winner, outcome, { date });
+        this.gameEventEmitter.emitTimeControlUpdate(this.game, this.timeControl);
+
+        this.logger.info('Game ended.', { winner, outcome });
+
+        this.emit('ended');
+
+        notifier.emit('gameEnd', this.game);
+    }
+
+    bindTimeControl(): void
+    {
+        if (!this.engineGame) {
+            this.logger.error('Cannot call bindTimeControl() now, game is not yet created.');
+            return;
+        }
+
+        bindTimeControlToGame(this.engineGame, this.timeControl);
+    }
+
+    isPlayerInGame(player: Player): boolean
+    {
+        return this.players.some(p => p.publicId === player.publicId);
+    }
+
+    private async createAndStartGame(): Promise<void>
+    {
+        if (this.game.state === 'canceled') {
+            this.logger.warning('Cannot init game, canceled');
+            return;
+        }
+
+        if (this.engineGame !== null) {
+            this.logger.warning('Cannot init game, already started');
+            return;
+        }
+
+        if (this.players.length < 2) {
+            this.logger.warning('Cannot init game, no opponent');
+            return;
+        }
+
+        this.affectPlayersColors();
+
+        this.game.state = 'playing';
+        this.game.startedAt = new Date();
+
+        this.engineGame = EngineGame.fromData(toEngineGameData(this.game));
+
+        this.listenEngineGame(this.engineGame);
+
+        this.saveState();
+
+        this.bindTimeControl();
+
+        this.gameEventEmitter.emitGameStarted(this.game);
+        this.gameEventEmitter.emitTimeControlUpdate(this.game, this.timeControl);
+
+        this.logger.info('Game Started.', { startedAt: this.game.startedAt });
+
+        notifier.emit('gameStart', this.game);
+
+        await this.autoSave.save();
+
+        this.makeAutomatedMoves().catch(e => {
+            this.logger.error('Error in makeAutomatedMoves() during createAndStartGame()', errorToLogger(e));
+        });
+    }
+
+    private affectPlayersColors(): void
+    {
+        // Do not alternate when game is created by system.
+        // Assume system has already set random colors as needed.
+        // If games are created by a tournament system,
+        // we assume tournament system already affect players colors randomly or depending on last match.
+        if (this.game.host === null) {
+            if (this.game.firstPlayer === null) {
+                this.logger.info('Game created by system, do not shuffle players color');
+                return;
+            }
+
+            this.logger.info('Game created by system, but fixed colors, set fixed colors');
+
+            if (this.game.firstPlayer === 1) {
+                this.players.reverse();
+            }
+
+            return;
+        }
+
+        // In case of rematch, alternate colors from previous game instead of random
+        if (this.game.rematchedFrom !== null) {
+            this.logger.info('Rematch alternate colors: should alternate?');
+
+            if (this.shouldAlternateColorsFromRematchedGame()) {
+                this.logger.info('Rematch alternate colors: yes, reversing player order');
+
+                this.players.reverse();
+            }
+
+            return;
+        }
+
+        // Random colors
+        if (this.game.firstPlayer === null) {
+            this.logger.info('Affect random colors');
+
+            if (Math.random() < 0.5) {
+                this.players.reverse();
+            }
+
+            return;
+        }
+
+
+        // Fixed colors
+        this.logger.info('Set fixed colors');
+
+        if (this.game.firstPlayer === 1) {
+            this.players.reverse();
+        }
+    }
+
+    /**
+     * Whether the players order should be reversed before starting the game.
+     * Depends on:
+     * - game config: random colors, or host plays first, or host plays second,
+     * - previous players colors
+     * - whether they are same players
+     */
+    private shouldAlternateColorsFromRematchedGame(): boolean
+    {
+        // no a rematch, do nothing
+        if (this.game.rematchedFrom === null) {
+            return false;
+        }
+
+        // Do not alternate if previous game is not played, i.e canceled
+        if (this.game.rematchedFrom.state !== 'ended') {
+            this.logger.info('Rematch alternate colors: no, previous game is not ended', { state: this.game.rematchedFrom.state });
+            return false;
+        }
+
+        const previousPlayersIds = this.game.rematchedFrom.gameToPlayers.map(gameToPlayer => gameToPlayer.playerId);
+        const currentPlayersIds = this.players.map(player => player.id ?? 0);
+
+        const samePlayers = currentPlayersIds.every(id => previousPlayersIds.includes(id));
+        const sameOrder = currentPlayersIds[0] === previousPlayersIds[0] && currentPlayersIds[1] === previousPlayersIds[1];
+
+        // If players have fixed positions (host plays first or second), keep same colors as before
+        if (this.game.firstPlayer !== null) {
+            if (sameOrder) {
+                this.logger.info('Rematch alternate colors: no, colors are fixed, and players have same order', { state: this.game.rematchedFrom.state });
+            } else {
+                this.logger.info('Rematch alternate colors: yes, colors are fixed, but players have not same order (the non-host rematched)', { state: this.game.rematchedFrom.state });
+            }
+
+            return !sameOrder;
+        }
+
+        // Do not alternate if someone else joined the rematch, so players are not the same
+        if (!samePlayers) {
+            this.logger.info('Rematch alternate colors: no, not same players', { previousPlayersIds, currentPlayersIds });
+            return false;
+        }
+
+        // Should alternate players from previous game,
+        // so alternate only if players kept same order from previous game
+        // (depending on who clicked the rematch button)
+        this.logger.info('Rematch alternate colors: yes, so reverse if player kept same order', { sameOrder, previousPlayersIds, currentPlayersIds });
+
+        return sameOrder;
+    }
+
+    /**
+     * A player join this game.
+     *
+     * @param isSystem Set true when playerJoin is called by system, not from a player action.
+     */
+    playerJoin(player: Player, isSystem = false): true | string
+    {
+        if (this.game.state !== 'created') {
+            this.logger.notice('Player tried to join but game has started or ended', { joiner: player.pseudo });
+            return 'Game has started or ended';
+        }
+
+        // Check whether game is full
+        if (this.players.length >= 2) {
+            this.logger.notice('Player tried to join but game is full', { joiner: player.pseudo });
+            return 'Game is full';
+        }
+
+        // Prevent a player from joining twice
+        if (this.isPlayerInGame(player)) {
+            this.logger.notice('Player tried to join twice', { joiner: player.pseudo });
+            return 'You already joined this game.';
+        }
+
+        // Cannot join games created by system
+        if (this.game.host === null && !isSystem) {
+            this.logger.notice('Player tried to join game created by system', { joiner: player.pseudo });
+            return 'Cannot join game created by system.';
+        }
+
+        // Game is a nominative challenge: only the targeted player can join.
+        // Checked before opponentMustBeRegistered so a challenged guest can still join.
+        if (this.game.opponentType === 'player'
+            && this.game.opponentPublicId !== null
+            && this.game.opponentPublicId !== player.publicId
+        ) {
+            this.logger.notice('Player tried to join a game reserved for another player', { joiner: player.pseudo });
+            return 'This game is reserved for another player.';
+        }
+
+        // Cannot join as guest if host requires opponent with account only
+        if (this.game.opponentMustBeRegistered && player.isGuest) {
+            this.logger.notice('Player tried to join game as guest but host wants only registered players', { joiner: player.pseudo });
+            return 'Cannot join game as guest, host want only players with account.';
+        }
+
+        this.players.push(player);
+
+        this.gameEventEmitter.emitGameJoined(this.game, player);
+
+        this.logger.info('Player joined.', { joiner: player.pseudo });
+
+        // Starts automatically when game is full
+        if (this.players.length === 2) {
+            this.createAndStartGame().catch(e => {
+                this.logger.error('Error in createAndStartGame() during playerJoin()', errorToLogger(e));
+            });
+        }
+
+        return true;
+    }
+
+    playerMove(player: Player, move: HexMove, playedAt: Date = new Date()): true | string
+    {
+        this.logger.info('Move played', { move, player: player.pseudo });
+
+        if (this.game.state !== 'playing') {
+            this.logger.notice('Player tried to move but game is not playing', { player: player.pseudo });
+            return 'Game is not playing';
+        }
+
+        if (!this.engineGame) {
+            this.logger.warning('Tried to make a move but game is not yet created.', { player: player.pseudo });
+            return 'Game not yet started, cannot make a move';
+        }
+
+        if (!this.isPlayerInGame(player)) {
+            this.logger.notice('A player not in the game tried to make a move', { player: player.pseudo });
+            return 'you are not a player of this game';
+        }
+
+        if (move === 'pass' && !canPassAgain(this.engineGame)) {
+            this.logger.notice('Tried to pass again', { player: player.pseudo });
+            return 'cannot pass infinitely. Now, play';
+        }
+
+        try {
+            this.engineGame.move(move, this.getPlayerIndex(player) as PlayerIndex, playedAt);
+
+            return true;
+        } catch (e) {
+            if (e instanceof IllegalMove) {
+                return e.message;
+            }
+
+            this.logger.warning('Unexpected error from player.move', { err: errorToString(e) });
+            return 'Unexpected error: ' + errorToString(e);
+        }
+    }
+
+    /**
+     * Receiving player premove.
+     *
+     * Race conditions to avoid:
+     * - receiving premove too late, for previous move, must not be played now (https://github.com/playhex/playhex/issues/131)
+     * - receiving premove too late, after opponent player, must play it now (https://github.com/playhex/playhex/issues/160)
+     */
+    playerPremove(player: Player, premove: Premove): true | string
+    {
+        if (this.game.state !== 'playing') {
+            this.logger.notice('Player tried to register a premove but game is not playing', { player: player.pseudo });
+            return 'Game is not playing';
+        }
+
+        if (!this.engineGame) {
+            this.logger.warning('Tried to register a premove but game is not yet created.', { player: player.pseudo });
+            return 'Game not yet started, cannot make a move';
+        }
+
+        const playerIndex = this.getPlayerIndex(player);
+
+        if (playerIndex === null) {
+            this.logger.notice('A player not in the game tried to register a premove', { player: player.pseudo });
+            return 'you are not a player of this game';
+        }
+
+        if (premove.moveIndex <= this.engineGame.getLastMoveIndex()) {
+            this.logger.notice('Premove received too late, a move has already been played for this index', { player: player.pseudo, premove, lastMoveIndex: this.engineGame.getLastMoveIndex() });
+            return 'a move is already played at this index';
+        }
+
+        if (playerIndex === this.engineGame.getCurrentPlayerIndex()) {
+            this.logger.notice('Premove received too late, but still my turn to play, fire it now', { player: player.pseudo });
+            this.playerMove(player, premove.move);
+            return true;
+        }
+
+        this.premoves[playerIndex] = premove;
+
+        return true;
+    }
+
+    playerCancelPremove(player: Player): true | string
+    {
+        const playerIndex = this.getPlayerIndex(player);
+
+        if (playerIndex === null) {
+            this.logger.notice('A player not in the game tried to cancel a premove', { player: player.pseudo });
+            return 'you are not a player of this game';
+        }
+
+        this.premoves[playerIndex] = null;
+
+        return true;
+    }
+
+    playerAskUndo(player: Player): true | string
+    {
+        this.logger.info('Player ask undo', { player: player.pseudo });
+
+        if (this.game.state !== 'playing') {
+            this.logger.notice('Player tried to ask undo but game is not playing', { player: player.pseudo });
+            return 'Game is not playing';
+        }
+
+        if (!this.engineGame) {
+            this.logger.warning('Tried to ask undo but game is not yet created.', { player: player.pseudo });
+            return 'Game not yet started, cannot ask undo';
+        }
+
+        const playerIndex = this.getPlayerIndex(player);
+
+        if (playerIndex === null) {
+            this.logger.notice('A player not in the game tried to ask undo', { player: player.pseudo });
+            return 'you are not a player of this game';
+        }
+
+        const game = this.getGame();
+
+        if (game.undoRequest !== null) {
+            this.logger.notice('A player tried to ask undo but there is already an undo request', { player: player.pseudo, undoRequest: game.undoRequest });
+            return 'there is already an undo request';
+        }
+
+        const reason = this.engineGame.canPlayerUndo(playerIndex);
+
+        if (reason !== true) {
+            return reason;
+        }
+
+        game.undoRequest = playerIndex;
+        this.gameEventEmitter.emitAskUndo(this.game, playerIndex);
+
+        this.makeAIAnswerUndoIfApplicable().catch(e => {
+            this.logger.error('Error in makeAIAnswerUndoIfApplicable()', errorToLogger(e));
+        });
+
+        return true;
+    }
+
+    playerAnswerUndo(player: Player, accept: boolean): true | string
+    {
+        this.logger.info('Player answer undo request', { player: player.pseudo, accept });
+
+        if (this.game.state !== 'playing') {
+            this.logger.notice('Player tried to answer undo but game is not playing', { player: player.pseudo });
+            return 'Game is not playing';
+        }
+
+        const playerIndex = this.getPlayerIndex(player);
+
+        if (playerIndex === null) {
+            this.logger.notice('A player not in the game tried to answer undo', { player: player.pseudo });
+            return 'you are not a player of this game';
+        }
+
+        if (!this.engineGame) {
+            this.logger.warning('Tried to answer undo but game is not yet created.', { player: player.pseudo });
+            return 'Game not yet started, cannot answer undo';
+        }
+
+        const game = this.getGame();
+        const now = new Date();
+
+        if (game.undoRequest === null) {
+            this.logger.notice('A player tried to answer undo but there is no undo request', { player: player.pseudo, undoRequest: game.undoRequest });
+            return 'there is no undo request';
+        }
+
+        if (game.undoRequest === playerIndex) {
+            this.logger.notice('A player tried to answer his own undo request', { player: player.pseudo, undoRequest: game.undoRequest });
+            return 'cannot answer own undo request';
+        }
+
+        const timeControlAfterUndo = recreateTimeControlAfterUndo(game, this.engineGame.playerUndoDryRun(game.undoRequest as PlayerIndex).length, now);
+
+        if (accept && timeControlAfterUndo === null) {
+            this.logger.notice('An undo request has been accepted, but will make time control elapsing. Ignoring');
+            return 'too late to accept undo request, it will elapse time control';
+        }
+
+        let undoneMoves: HexMove[] = [];
+
+        if (accept) {
+            undoneMoves = this.engineGame.playerUndo(game.undoRequest as PlayerIndex).map(({ move }) => move);
+        }
+
+        const playerUndoing = this.players[game.undoRequest];
+        this.saveGameState();
+        game.undoRequest = null;
+        this.gameEventEmitter.emitAnswerUndo(this.game, accept, undoneMoves);
+
+        if (accept) {
+            this.timeControl.setValues(timeControlAfterUndo!.getValues(), now);
+            game.timeControl = this.timeControl.getValues();
+            this.gameEventEmitter.emitTimeControlUpdate(this.game, this.timeControl);
+
+            if (!isBotGame(this.game)) {
+                this.postSystemChatMessage(
+                    pseudoString(playerUndoing) + ' took back their move.',
+                    'undo.player_takeback_his_move',
+                    { player: pseudoString(playerUndoing) },
+                    now,
+                );
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * A player undo request is automatically canceled when this same player make a move.
+     */
+    private cancelUndoRequestIfAny(playerIndex: number): void
+    {
+        if (!this.game || typeof this.game.undoRequest !== 'number') {
+            return;
+        }
+
+        if (playerIndex === this.game.undoRequest) {
+            this.game.undoRequest = null;
+            this.gameEventEmitter.emitCancelUndo(this.game);
+        }
+    }
+
+    playerResign(player: Player): true | string
+    {
+        if (this.game.state !== 'playing') {
+            this.logger.notice('Player tried to resign but game is not playing', { joiner: player.pseudo });
+            return 'Game is not playing';
+        }
+
+        if (!this.engineGame) {
+            this.logger.warning('Tried to resign but game is not yet created.', { player: player.pseudo });
+            return 'Game not yet started, cannot resign';
+        }
+
+        if (!this.isPlayerInGame(player)) {
+            this.logger.notice('A player not in the game tried to resign', { player: player.pseudo });
+            return 'you are not a player of this game';
+        }
+
+        const now = new Date();
+
+        try {
+            this.engineGame.resign(this.getPlayerIndex(player) as PlayerIndex, now);
+
+            return true;
+        } catch (e) {
+            this.logger.warning('Unexpected error from player.resign', errorToLogger(e));
+            return errorToString(e);
+        }
+    }
+
+    private canCancel(player: Player): true | string
+    {
+        if (!this.isPlayerInGame(player) && !isChallengeTargetOf(this.game, player)) {
+            this.logger.notice('A player not in the game tried to cancel game', { player: player.pseudo });
+            return 'you are not a player of this game';
+        }
+
+        if (this.game.state !== 'playing' && this.game.state !== 'created') {
+            this.logger.notice('Player tried to cancel but game is not playing nor created', { joiner: player.pseudo });
+            return 'Game is not playing nor created';
+        }
+
+        if (this.engineGame === null) {
+            return true;
+        }
+
+        if (this.engineGame.getMovesHistory().length >= this.players.length) {
+            this.logger.notice('A player tried to cancel, but too late, every player played a move', { player: player.pseudo });
+            return 'cannot cancel now, each player has played at least one move';
+        }
+
+        return true;
+    }
+
+    playerCancel(player: Player): true | string
+    {
+        this.logger.info('Player cancel game', { player: player.pseudo });
+
+        const canCancel = this.canCancel(player);
+
+        if (canCancel !== true) {
+            this.logger.notice('Player tried to cancel game, but cannot', { player: player.pseudo, canCancel });
+            return canCancel;
+        }
+
+        const now = new Date();
+
+        this.pendingCancelReason = isChallengeTargetOf(this.game, player)
+            ? 'declined'
+            : this.game.host?.publicId === player.publicId
+                ? 'by_host'
+                : 'by_opponent'
+        ;
+
+        if (this.engineGame !== null) {
+            this.engineGame.cancel(now);
+        } else {
+            this.doCancel(now, this.pendingCancelReason);
+        }
+
+        return true;
+    }
+
+    systemCancel(cancelReason: CancelGameReason): void
+    {
+        this.logger.info('System cancel game', { cancelReason });
+
+        const now = new Date();
+
+        this.pendingCancelReason = cancelReason;
+
+        if (this.engineGame !== null) {
+            if (this.engineGame.isEnded()) {
+                this.logger.warning('systemCancel() but game is already canceled. Ignore');
+            } else {
+                this.engineGame.cancel(now);
+            }
+        } else {
+            this.doCancel(now, cancelReason);
+        }
+    }
+
+    private doCancel(date: Date, cancelReason: null | CancelGameReason): void
+    {
+        this.game.state = 'canceled';
+        this.game.cancelReason = cancelReason;
+        this.pendingCancelReason = null;
+        this.game.endedAt = date;
+
+        this.gameEventEmitter.emitGameCanceled(this.game, { date });
+        this.gameEventEmitter.emitTimeControlUpdate(this.game, this.timeControl);
+
+        this.logger.info('game server canceled', { date });
+
+        this.emit('canceled');
+
+        notifier.emit('gameCanceled', this.game);
+    }
+
+    systemForfeit(player: Player): void
+    {
+        this.logger.info('System cancel game');
+
+        if (!this.isPlayerInGame(player)) {
+            throw new Error('Cannot forfeit this player, not in game');
+        }
+
+        if (this.game.state !== 'playing' && this.game.state !== 'created') {
+            throw new Error('Game is not playing nor created');
+        }
+
+        const now = new Date();
+        const playerIndex = this.getPlayerIndex(player);
+
+        if (playerIndex === null) {
+            throw new Error('Cannot forfeit this player, not in game');
+        }
+
+        if (this.engineGame !== null) {
+            this.engineGame.forfeit(playerIndex, now);
+        } else {
+            this.doEnd(1 - playerIndex as PlayerIndex, 'forfeit', now);
+        }
+    }
+
+    postSystemChatMessage(content: string, translationKey: string, translationParameters: null | object = null, now = new Date())
+    {
+        const chatMessage = new ChatMessage();
+
+        chatMessage.player = null;
+        chatMessage.content = content;
+        chatMessage.game = this.game;
+        chatMessage.createdAt = now;
+        chatMessage.contentTranslationKey = translationKey;
+        chatMessage.translationParameters = translationParameters;
+
+        this.postChatMessage(chatMessage);
+    }
+
+    postChatMessage(chatMessage: ChatMessage)
+    {
+        this.logger.info('Chat message posted', { gamePublicId: this.getPublicId(), author: chatMessage.player?.pseudo, content: chatMessage.content, createdAt: chatMessage.createdAt });
+        this.game.chatMessages.push(chatMessage);
+        notifier.emit('chatMessage', this.game, chatMessage);
+        this.gameEventEmitter.emitChat(this.game, chatMessage);
+        this.emit('chat');
+    }
+
+    /**
+     * Save game state into game.
+     */
+    private saveGameState(): void
+    {
+        if (this.engineGame === null) {
+            return;
+        }
+
+        assignEngineGameData(this.game, this.engineGame.toData());
+    }
+
+    private savePlayersState(): void
+    {
+        for (let i = 0; i < this.players.length; ++i) {
+            const player = this.players[i];
+            let gameToPlayer = this.game.gameToPlayers.find(h => h.player.publicId === player.publicId);
+
+            if (undefined === gameToPlayer) {
+                gameToPlayer = new GameToPlayer();
+                this.game.gameToPlayers.push(gameToPlayer);
+            }
+
+            gameToPlayer.game = this.game;
+            gameToPlayer.player = player;
+            gameToPlayer.order = i;
+        }
+
+        this.game.gameToPlayers.sort((a, b) => a.order - b.order);
+    }
+
+    private saveTimeControlState(): void
+    {
+        this.game.timeControl = this.timeControl.getValues();
+    }
+
+    /**
+     * Save players, game and time control state from this attributes to entity attributes.
+     * Should be called to have a fresh game entity, e.g before sending it as an event,
+     * or before persisting to database.
+     */
+    saveState(): void
+    {
+        this.saveGameState();
+        this.savePlayersState();
+        this.saveTimeControlState();
+    }
+
+    persist(): Promise<Game>
+    {
+        this.saveState();
+        return this.autoSave.save();
+    }
+
+    getGame(): Game
+    {
+        this.saveState();
+
+        return this.game;
+    }
+}

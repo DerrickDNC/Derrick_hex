@@ -1,0 +1,113 @@
+import assert from 'assert';
+import { ChatMessage, Player } from '../models/index.js';
+import { RichChat } from '../rich-chat.js';
+import { createGame } from '../models/Game.js';
+import { coordsToMove } from '../../move-notation/move-notation.js';
+
+describe('Rich Chat', () => {
+    it('yield date headers', () => {
+        const game = createGame();
+        const red = new Player();
+        const blue = new Player();
+
+        red.pseudo = 'red';
+        blue.pseudo = 'blue';
+
+        game.startedAt = new Date('2024-08-24T12:00:00Z');
+
+        const message0 = new ChatMessage();
+        message0.content = 'Hi';
+        message0.createdAt = new Date('2024-08-24T12:01:00Z');
+        message0.player = red;
+
+        const message1 = new ChatMessage();
+        message1.content = 'Hello';
+        message1.createdAt = new Date('2024-08-24T12:02:00Z');
+        message1.player = blue;
+
+        const message2 = new ChatMessage();
+        message2.content = 'Hi tomorrow';
+        message2.createdAt = new Date('2024-08-25T10:00:00Z');
+        message2.player = blue;
+
+        game.chatMessages = [
+            message0,
+            message1,
+            message2,
+        ];
+
+        const richChat = new RichChat(game)
+            .getRichChatMessages()
+            .filter(item => item instanceof ChatMessage || item.type === 'date')
+        ;
+
+        assert.strictEqual(richChat.length, 5);
+        assert.deepStrictEqual(richChat[0], { type: 'date', date: new Date('2024-08-24T12:01:00Z') });
+        assert.strictEqual(richChat[1], message0);
+        assert.strictEqual(richChat[2], message1);
+        assert.deepStrictEqual(richChat[3], { type: 'date', date: new Date('2024-08-25T10:00:00Z') });
+        assert.strictEqual(richChat[4], message2);
+    });
+
+    it('yield move number headers', () => {
+        const game = createGame();
+        const red = new Player();
+        const blue = new Player();
+
+        red.pseudo = 'red';
+        blue.pseudo = 'blue';
+
+        game.startedAt = new Date('2024-08-24T12:00:00Z');
+        game.moves = [
+            coordsToMove({ row: 0, col: 0 }),
+            coordsToMove({ row: 0, col: 1 }),
+            coordsToMove({ row: 0, col: 2 }),
+            coordsToMove({ row: 0, col: 3 }),
+            coordsToMove({ row: 0, col: 4 }),
+            coordsToMove({ row: 0, col: 5 }),
+        ];
+        game.moveTimestamps = [
+            new Date('2024-08-24T12:01:00Z'),
+            new Date('2024-08-24T12:01:01Z'),
+            new Date('2024-08-24T12:01:02Z'),
+            new Date('2024-08-24T12:05:00Z'),
+            new Date('2024-08-24T12:06:00Z'),
+            new Date('2024-08-24T12:07:00Z'),
+        ];
+
+        game.chatMessages = [];
+
+        const message0 = new ChatMessage();
+        message0.content = 'Hi';
+        message0.createdAt = new Date('2024-08-24T12:00:01Z');
+        message0.player = red;
+
+        const message1 = new ChatMessage();
+        message1.content = 'Hello';
+        message1.createdAt = new Date('2024-08-24T12:00:02Z');
+        message1.player = blue;
+
+        const message2 = new ChatMessage();
+        message2.content = 'Good move!';
+        message2.createdAt = new Date('2024-08-24T12:05:01Z');
+        message2.player = blue;
+
+        game.chatMessages = [
+            message0,
+            message1,
+            message2,
+        ];
+
+        const richChat = new RichChat(game)
+            .getRichChatMessages()
+            .filter(item => item instanceof ChatMessage || item.type === 'move')
+        ;
+
+        assert.strictEqual(richChat.length, 4);
+        assert.strictEqual(richChat[0], message0);
+        assert.strictEqual(richChat[1], message1);
+        assert.deepStrictEqual(richChat[2], { type: 'move', moveNumber: 4 });
+        assert.strictEqual(richChat[3], message2);
+    });
+
+});

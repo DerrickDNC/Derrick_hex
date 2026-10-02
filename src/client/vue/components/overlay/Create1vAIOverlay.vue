@@ -1,0 +1,222 @@
+<script setup lang="ts">
+import { useDisclosure } from '@overlastic/vue';
+import { PropType, reactive, Ref, ref, toRef, watch } from 'vue';
+import { IconCaretDownFill, IconCaretRight, IconExclamationTriangle, IconRobot } from '../../icons.js';
+import AppBoardsize from './create-game/AppBoardsize.vue';
+import AppPlayFirstOrSecond from './create-game/AppPlayFirstOrSecond.vue';
+import AppSwapRule from './create-game/AppSwapRule.vue';
+import AppTimeControl from '../AppTimeControl.vue';
+import useAiConfigsStore from '../../../stores/aiConfigsStore.js';
+import { storeToRefs } from 'pinia';
+import { AIConfigStatusData } from '../../../../shared/app/Types.js';
+import { apiGetAiConfigsStatus } from '../../../apiClient.js';
+import { AIConfig, GameOptions } from '../../../../shared/app/models/index.js';
+import TimeControlType from '../../../../shared/time-control/TimeControlType.js';
+
+const { visible, confirm, cancel } = useDisclosure();
+
+const props = defineProps({
+    gameOptions: {
+        type: Object as PropType<GameOptions>,
+        required: true,
+    },
+});
+
+const gameOptions = reactive(props.gameOptions);
+
+const timeControl = toRef(gameOptions.timeControlType);
+watch<TimeControlType>(timeControl, t => gameOptions.timeControlType = t);
+
+const showSecondaryOptions = ref(false);
+
+/*
+ * AI configs
+ */
+const { aiConfigs } = storeToRefs(useAiConfigsStore());
+const selectedAiConfig = ref<AIConfig | null>(null);
+const aiConfigsStatus: Ref<null | AIConfigStatusData> = ref(null);
+
+void (async () => {
+    aiConfigsStatus.value = await apiGetAiConfigsStatus();
+})();
+
+const capSelectedBoardsize = () => {
+    if (selectedAiConfig.value === null) {
+        return;
+    }
+
+    const { boardsizeMin, boardsizeMax } = selectedAiConfig.value;
+
+    if (typeof boardsizeMin === 'number' && gameOptions.boardsize < boardsizeMin) {
+        gameOptions.boardsize = boardsizeMin;
+    }
+
+    if (typeof boardsizeMax === 'number' && gameOptions.boardsize > boardsizeMax) {
+        gameOptions.boardsize = boardsizeMax;
+    }
+};
+
+const selectAiConfig = (aiConfig: AIConfig): void => {
+    selectedAiConfig.value = aiConfig;
+    capSelectedBoardsize();
+};
+
+const isAIConfigAvailable = (aiConfig: AIConfig): boolean => {
+    if (!aiConfig.isRemote) {
+        return true;
+    }
+
+    if (aiConfigsStatus.value === null) {
+        return false;
+    }
+
+    if (aiConfig.isRemote && !aiConfigsStatus.value.aiApiAvailable) {
+        return false;
+    }
+
+    if (aiConfig.requireMorePower && !aiConfigsStatus.value.powerfulPeerAvailable) {
+        return false;
+    }
+
+    return true;
+};
+
+// Automatically select first (easiest) AI on load if none selected yet
+const selectFirstAiConfig = () => {
+    if (aiConfigs.value.length === 0 || selectedAiConfig.value !== null) {
+        return;
+    }
+
+    const firstAiConfig = aiConfigs.value[0];
+    gameOptions.opponentPublicId = firstAiConfig.player.publicId;
+    selectAiConfig(firstAiConfig);
+};
+
+selectFirstAiConfig();
+
+watch(aiConfigs, () => {
+    selectFirstAiConfig();
+});
+</script>
+
+<template>
+    <div v-if="visible">
+        <div class="modal d-block">
+            <div class="modal-dialog">
+                <form class="modal-content" @submit.prevent="confirm(gameOptions)">
+                    <div class="modal-header">
+                        <h5 class="modal-title">{{ $t('1vAI_friendly.title') }}</h5>
+                        <button type="button" class="btn-close" @click="cancel()"></button>
+                    </div>
+                    <div class="modal-body">
+                        <template v-if="null !== aiConfigsStatus">
+                            <p v-if="!aiConfigsStatus.aiApiAvailable" class="text-danger mb-0"><IconExclamationTriangle /> <small>{{ $t('workers.no_worker') }}</small></p>
+                            <p v-else-if="!aiConfigsStatus.powerfulPeerAvailable" class="text-warning mb-0"><IconExclamationTriangle /> <small>{{ $t('workers.slow_worker') }}</small></p>
+
+                            <p v-if="!aiConfigsStatus.aiApiAvailable || !aiConfigsStatus.powerfulPeerAvailable">
+                                <small>
+                                    <router-link
+                                        :to="{ name: 'spawn-worker' }"
+                                        @click="cancel()"
+                                    >{{ $t('workers.see_how_to_spawn_a_worker') }}</router-link>
+                                </small>
+                            </p>
+                        </template>
+
+                        <div class="mb-3">
+                            <h6><IconRobot class="me-1" /> AI engine and level</h6>
+
+                            <div v-for="aiConfig in aiConfigs" :key="aiConfig.player.publicId" class="form-check">
+                                <input
+                                    v-model="gameOptions.opponentPublicId"
+                                    @click="selectAiConfig(aiConfig)"
+                                    required
+                                    :disabled="!isAIConfigAvailable(aiConfig)"
+                                    class="form-check-input"
+                                    :class="'level-' + aiConfig.relativeLevel"
+                                    type="radio"
+                                    name="flexRadioDefault"
+                                    :id="aiConfig.player.publicId"
+                                    :value="aiConfig.player.publicId"
+                                >
+                                <label class="form-check-label" :for="aiConfig.player.publicId">
+                                    {{ aiConfig.label }} <small class="text-secondary">{{ aiConfig.description }}</small>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <AppBoardsize
+                                v-model="gameOptions.boardsize"
+                                :boardsizeMin="selectedAiConfig?.boardsizeMin ?? undefined"
+                                :boardsizeMax="selectedAiConfig?.boardsizeMax ?? undefined"
+                            />
+                        </div>
+
+                        <div class="mb-3">
+                            <AppTimeControl v-model="timeControl" />
+                        </div>
+
+                        <button
+                            v-if="showSecondaryOptions"
+                            @click="showSecondaryOptions = false"
+                            type="button"
+                            class="btn btn-primary btn-sm mt-3"
+                        ><IconCaretDownFill /> {{ $t('create_game.less_options') }}</button>
+                        <button
+                            v-else
+                            @click="showSecondaryOptions = true"
+                            type="button"
+                            class="btn btn-outline-primary btn-sm mt-3"
+                        ><IconCaretRight /> {{ $t('create_game.more_options') }}</button>
+                    </div>
+                    <div v-if="showSecondaryOptions" class="modal-body border-top">
+                        <div class="mb-3">
+                            <AppPlayFirstOrSecond v-model="gameOptions.firstPlayer" />
+                        </div>
+
+                        <div class="mb-3">
+                            <AppSwapRule v-model="gameOptions.swapRule" />
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline-secondary" @click="cancel()">{{ $t('cancel') }}</button>
+                        <button type="submit" class="btn btn-success">{{ $t('1vAI_friendly.create') }}</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <div class="modal-backdrop show d-fixed"></div>
+    </div>
+</template>
+
+<style lang="stylus" scoped>
+.ai-engine-choice
+    .nav-link::first-letter
+        text-transform capitalize
+
+.level-1
+    background-color #d1e7dd
+
+.level-2
+    background-color var(--bs-success)
+
+.level-3
+    background-color var(--bs-warning)
+
+.level-4
+    background-color var(--bs-danger)
+
+.level-5
+    background-color #520dc2
+
+.level-6
+    background-color #290661
+
+
+.level-0
+    background-color var(--bs-secondary)
+
+input[type="radio"]:checked + label
+    font-weight bold
+</style>

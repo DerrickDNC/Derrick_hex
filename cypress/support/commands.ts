@@ -1,0 +1,277 @@
+/// <reference types="cypress" />
+
+import { correspondenceInitialTimeSteps, correspondenceSecondaryTimeSteps, liveInitialTimeSteps, liveSecondaryTimeSteps, toMs } from './timeControlsSliders';
+
+// ***********************************************
+// This example commands.ts shows you how to
+// create various custom commands and overwrite
+// existing commands.
+//
+// For more comprehensive examples of custom
+// commands please read more here:
+// https://on.cypress.io/custom-commands
+// ***********************************************
+//
+//
+// -- This is a parent command --
+// Cypress.Commands.add('login', (email, password) => { ... })
+//
+//
+// -- This is a child command --
+// Cypress.Commands.add('drag', { prevSubject: 'element'}, (subject, options) => { ... })
+//
+//
+// -- This is a dual command --
+// Cypress.Commands.add('dismiss', { prevSubject: 'optional'}, (subject, options) => { ... })
+//
+//
+// -- This will overwrite an existing command --
+// Cypress.Commands.overwrite('visit', (originalFn, url, options) => { ... })
+//
+// declare global {
+//   namespace Cypress {
+//     interface Chainable {
+//       login(email: string, password: string): Chainable<void>
+//       drag(subject: string, options?: Partial<TypeOptions>): Chainable<Element>
+//       dismiss(subject: string, options?: Partial<TypeOptions>): Chainable<Element>
+//       visit(originalFn: CommandOriginalFn, url: string, options: Partial<VisitOptions>): Chainable<Element>
+//     }
+//   }
+// }
+
+const { socketIoMock } = require('./socketIoMock');
+const { plainToInstance } = require('../../src/shared/app/class-transformer-custom');
+const { Game, OnlinePlayers } = require('../../src/shared/app/models');
+
+/*
+ * To add a command, also add declaration in ./index.d.ts
+ */
+
+/*
+ * Guest pseudo, as displayed in the page.
+ * "Guest" and the player number are two distinct elements,
+ * separated by a non breaking space, so match whitespaces loosely.
+ */
+const guestPseudoPattern = 'Guest\\s\\d+';
+
+/**
+ * Replaces "GUEST" in a pattern by the guest pseudo pattern.
+ * I.e /GUEST wins!/ becomes /Guest\s\d+ wins!/
+ */
+const guestPseudoRegExp = (pattern: RegExp): RegExp => new RegExp(
+    pattern.source.replace('GUEST', guestPseudoPattern),
+    pattern.flags,
+);
+
+Cypress.Commands.add('containsGuestPseudo', (selector = null, pattern = /GUEST/) => {
+    return cy.get(selector ?? 'body').contains(guestPseudoRegExp(pattern));
+});
+
+/**
+ * Open the player menu, from the player button in top menu.
+ *
+ * Click natively: with "cy.click()", the simulated mouse hover
+ * already opens the menu, and the click would close it back.
+ */
+Cypress.Commands.add('openPlayerMenu', () => {
+    // The menu closes on route change, wait for current page to be rendered before opening it
+    cy.get('main').children().should('have.length.at.least', 1);
+
+    cy.get('.menu-top .player-button').then($playerButton => $playerButton[0].click());
+
+    return cy.get('.player-menu').should('be.visible');
+});
+
+Cypress.Commands.add('goToMyProfilePage', () => {
+    cy.openPlayerMenu().contains(/My (guest )?account/).click();
+
+    return cy.get('h2.pseudo-heading');
+});
+
+Cypress.Commands.add('createAIGameWithRandom', (submit = true, wait = false) => {
+    cy.contains('Play vs AI').click();
+
+    cy
+        .contains('h5', 'Play vs AI')
+        .closest('.modal-content')
+        .contains('TestBot Determinist ' + (wait ? 'wait' : 'instant'))
+        .click()
+    ;
+
+    if (!submit) {
+        return;
+    }
+
+    cy.submitAIGame();
+});
+
+Cypress.Commands.add('submitAIGame', () => {
+    cy
+        .contains('h5', 'Play vs AI')
+        .closest('.modal-content')
+        .contains('button', 'Play vs AI')
+        .click()
+    ;
+
+    cy.contains('.sidebar', 'Playing');
+});
+
+Cypress.Commands.add('play', (x, y) => {
+    cy.get('canvas');
+    cy.wait(50);
+    cy.get('body').click(x, y);
+});
+
+Cypress.Commands.add('openGameSidebar', () => {
+    cy
+        .get('[aria-label="Open game sidebar and chat"]')
+        .click()
+    ;
+});
+
+Cypress.Commands.add('closeGameSidebar', () => {
+    cy
+        .contains('.block-close', 'Close')
+        .click()
+    ;
+});
+
+let socketIoMocked = false;
+
+beforeEach(() => {
+    socketIoMocked = false;
+
+    // socketIoMock is a singleton: drop listeners left by apps loaded in previous tests
+    socketIoMock.removeAllListeners();
+});
+
+Cypress.Commands.add('mockSocketIO', () => {
+    cy.on('window:before:load', (window) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).io = () => socketIoMock;
+    });
+
+    socketIoMocked = true;
+});
+
+Cypress.Commands.add('receiveSocketIoMessage', (type, ...args) => {
+    if (!socketIoMocked) {
+        throw new Error('Cannot emit mocked socket message, must call "cy.mockSocketIO()" at the beginning of the test');
+    }
+
+    // "cy.visit()" resolves before the app is mounted, wait for it to listen or the message is lost
+    cy
+        .wrap(null, { log: false })
+        .should(() => {
+            expect(
+                socketIoMock.listenerCount(type),
+                `app should be listening to "${type}" socket messages`,
+            ).to.be.greaterThan(0);
+        })
+        .then(() => {
+            Cypress.log({
+                name: 'receiveSocketIoMessage',
+                message: type,
+                consoleProps: () => ({
+                    eventName: type,
+                    args,
+                }),
+            });
+
+            socketIoMock.emit(type, ...args);
+        })
+    ;
+});
+
+Cypress.Commands.add('receiveGameUpdate', fixtureFile => {
+    cy.fixture(fixtureFile).then((fixture: unknown) => {
+        const game = plainToInstance(Game, fixture);
+
+        cy.receiveSocketIoMessage('gameUpdate', game.publicId, plainToInstance(Game, fixture));
+    });
+});
+
+Cypress.Commands.add('receiveLobbyUpdate', fixtureFile => {
+    cy.fixture(fixtureFile).then((fixtures: unknown[]) => {
+        cy.receiveSocketIoMessage('lobbyUpdate', fixtures.map(fixture => plainToInstance(Game, fixture)));
+    });
+});
+
+Cypress.Commands.add('receiveLobbyGameCreated', fixtureFile => {
+    cy.fixture(fixtureFile).then((fixture: unknown) => {
+        cy.receiveSocketIoMessage('lobbyGameCreated', plainToInstance(Game, fixture));
+    });
+});
+
+Cypress.Commands.add('receivePlayerGamesUpdate', fixtureFile => {
+    cy.fixture(fixtureFile).then((fixtures: unknown[]) => {
+        const games = fixtures.map(fixture => plainToInstance(Game, fixture));
+
+        cy.receiveSocketIoMessage('lobbyUpdate', games);
+        cy.receiveSocketIoMessage('playerGamesUpdate', games);
+    });
+});
+
+Cypress.Commands.add('receiveMyGamesUpdate', fixtureFile => {
+    cy.fixture(fixtureFile).then((fixtures: unknown[]) => {
+        cy.receiveSocketIoMessage('playerGamesUpdate', fixtures.map(fixture => plainToInstance(Game, fixture)));
+    });
+});
+
+Cypress.Commands.add('mockSendChannelChat', (player) => {
+    socketIoMock.once('sendChannelChat', (channel: string, content: string, answer: (error?: unknown) => void) => {
+        answer();
+        socketIoMock.emit('channelChatMessagePosted', channel, {
+            publicId: `test-${Date.now()}`,
+            content,
+            createdAt: new Date().toISOString(),
+            player,
+        });
+    });
+});
+
+Cypress.Commands.add('receiveOnlinePlayersUpdate', fixtureFile => {
+    cy.fixture(fixtureFile).then((fixture: unknown[]) => {
+        cy.receiveSocketIoMessage('onlinePlayersUpdate', plainToInstance(OnlinePlayers, fixture));
+    });
+});
+
+Cypress.Commands.add('receiveGameStarted', fixtureFile => {
+    cy.fixture(fixtureFile).then((fixture: unknown) => {
+        cy.receiveSocketIoMessage('gameStarted', plainToInstance(Game, fixture));
+    });
+});
+
+Cypress.Commands.add('receiveMoved', (gameId, move, moveIndex, byPlayerIndex) => {
+    cy.receiveSocketIoMessage('moved', gameId, { move, playedAt: new Date() }, moveIndex, byPlayerIndex);
+});
+
+Cypress.Commands.add('slidePrimaryTimeControl', (value, unit) => {
+    const ms = toMs(value, unit);
+    let index = liveInitialTimeSteps.indexOf(ms);
+
+    if (index < 0) {
+        index = correspondenceInitialTimeSteps.indexOf(ms);
+    }
+
+    if (index < 0) {
+        throw new Error(`No primary time control value for ${value}${unit} (${ms}ms)`);
+    }
+
+    cy.get('input#custom-initial-time').invoke('val', index).trigger('input');
+});
+
+Cypress.Commands.add('slideSecondaryTimeControl', (value, unit) => {
+    const ms = toMs(value, unit);
+    let index = liveSecondaryTimeSteps.indexOf(ms);
+
+    if (index < 0) {
+        index = correspondenceSecondaryTimeSteps.indexOf(ms);
+    }
+
+    if (index < 0) {
+        throw new Error(`No secondary time control value for ${value}${unit} (${ms}ms)`);
+    }
+
+    cy.get('input#custom-time-increment').invoke('val', index).trigger('input');
+});

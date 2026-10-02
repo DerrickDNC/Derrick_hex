@@ -1,0 +1,100 @@
+import { Service } from 'typedi';
+import { WebsocketControllerInterface } from './index.js';
+import { HexServer, HexSocket } from '../../server.js';
+import OnlinePlayersService from '../../services/OnlinePlayersService.js';
+import Rooms from '../../../shared/app/Rooms.js';
+
+@Service()
+export default class OnlinePlayersWebsocketController implements WebsocketControllerInterface
+{
+    constructor(
+        private hexServer: HexServer,
+        private onlinePlayersService: OnlinePlayersService,
+    ) {
+        this.listenOnlinePlayersServiceEvents();
+    }
+
+    private emitActivePlayersCount(): void
+    {
+        this.hexServer.to(Rooms.onlinePlayersCount).emit(
+            'onlinePlayersCount',
+            this.onlinePlayersService.getActiveAndInactivePlayersCount(),
+        );
+    }
+
+    private listenOnlinePlayersServiceEvents(): void
+    {
+        this.onlinePlayersService
+
+            .on('playerConnected', player => {
+                this.hexServer.to(Rooms.onlinePlayers).emit(
+                    'playerConnected',
+                    player,
+                    this.onlinePlayersService.getOnlinePlayersCount(),
+                );
+            })
+
+            .on('playerDisconnected', player => {
+                this.hexServer.to(Rooms.onlinePlayers).emit(
+                    'playerDisconnected',
+                    player,
+                    this.onlinePlayersService.getOnlinePlayersCount(),
+                );
+
+                this.emitActivePlayersCount();
+            })
+
+            .on('playerActive', (player, lastState) => {
+                // Ignore when player was already active
+                if (lastState) {
+                    return;
+                }
+
+                this.hexServer.to(Rooms.onlinePlayers).emit(
+                    'playerActive',
+                    player,
+                );
+
+                this.emitActivePlayersCount();
+            })
+
+            .on('playerInactive', (player) => {
+                this.hexServer.to(Rooms.onlinePlayers).emit(
+                    'playerInactive',
+                    player,
+                );
+
+                this.emitActivePlayersCount();
+            })
+
+        ;
+    }
+
+    onConnection(socket: HexSocket): void
+    {
+        this.onlinePlayersService.socketHasConnected(socket);
+        socket.on('disconnect', () => this.onlinePlayersService.socketHasDisconnected(socket));
+
+        socket.on('activity', onlinePlayerPage => {
+            const { player } = socket.data;
+
+            if (player === null) {
+                return;
+            }
+
+            this.onlinePlayersService.notifyPlayerActivity(player, onlinePlayerPage);
+        });
+    }
+
+    onJoinRoom(socket: HexSocket, room: string): void
+    {
+        if (room === Rooms.onlinePlayers) {
+            const onlinePlayers = this.onlinePlayersService.getOnlinePlayers();
+            socket.emit('onlinePlayersUpdate', onlinePlayers);
+        }
+
+        if (room === Rooms.onlinePlayersCount) {
+            socket.emit('onlinePlayersCount', this.onlinePlayersService.getActiveAndInactivePlayersCount());
+        }
+    }
+}

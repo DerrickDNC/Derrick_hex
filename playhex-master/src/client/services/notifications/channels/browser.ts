@@ -1,0 +1,123 @@
+import { t } from 'i18next';
+import { getOpponent, hasFocus, iAmInGame, isMe, viewingGame } from '../../context-utils.js';
+import { notifier } from '../notifier.js';
+import { pseudoString } from '../../../../shared/app/pseudoUtils.js';
+import router from '../../../vue/router.js';
+import { isBotGame } from '../../../../shared/app/gameUtils.js';
+import { serviceWorkerRegistrationPromise } from '../../registerServiceWorker.js';
+import { getNotificationPermission } from '../../browserNotification.js';
+import { RouteLocationAsRelativeTyped } from 'vue-router';
+import useGameChatSubscriptionsStore from '../../../stores/gameChatSubscriptionsStore.js';
+
+const icon = '/images/logo-transparent.svg';
+
+const tags = {
+    default: 'hex default notifications',
+    game: 'game notifications',
+};
+
+/**
+ * If user input is used as body, it should be sanitized,
+ * i.e <b> and <i> must be escaped.
+ */
+const sanitizeNotificationBody = (body: string): string => {
+    const text = document.createTextNode(body);
+    const p = document.createElement('p');
+    p.appendChild(text);
+    return p.innerHTML;
+};
+
+const sendNotification = async (options: NotificationOptions, route: RouteLocationAsRelativeTyped, title = 'PlayHex') => {
+    if (getNotificationPermission() !== 'granted') {
+        return;
+    }
+
+    const serviceWorkerRegistration = await serviceWorkerRegistrationPromise;
+
+    if (serviceWorkerRegistration === null) {
+        return;
+    }
+
+    const computedOptions: NotificationOptions = {
+        tag: tags.default,
+        ...options,
+        icon,
+        data: {
+            goToPath: router.resolve(route).fullPath,
+        },
+    };
+
+    await serviceWorkerRegistration.showNotification(title, computedOptions);
+};
+
+notifier.on('gameStart', (game) => {
+    if (isBotGame(game)) {
+        return;
+    }
+
+    if (viewingGame(game) && hasFocus()) {
+        return;
+    }
+
+    if (game.host === null) {
+        // If no host, notify if I am in the game.
+        if (!iAmInGame(game)) {
+            return;
+        }
+    } else {
+        // Only notify game host. Player who just joined don't need to be notified, neither are watchers.
+        if (!isMe(game.host)) {
+            return;
+        }
+    }
+
+    const opponent = getOpponent(game);
+
+    if (opponent === null) {
+        return;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    sendNotification(
+        {
+            body: t('game_with_player_has_started', { player: pseudoString(opponent, 'pseudo') }),
+            tag: tags.game,
+        },
+        {
+            name: 'online-game',
+            params: { gameId: game.publicId },
+        },
+    );
+});
+
+notifier.on('chatMessage', (game, chatMessage) => {
+    if (chatMessage.player === null) {
+        return;
+    }
+
+    if (isMe(chatMessage.player)) {
+        return;
+    }
+
+    // Muted this game chat, or watching a game I did not subscribe to
+    if (!useGameChatSubscriptionsStore().isChatNotificationEnabled(game)) {
+        return;
+    }
+
+    if (viewingGame(game) && hasFocus()) {
+        return;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    sendNotification(
+        {
+            body: sanitizeNotificationBody(chatMessage.content),
+            tag: tags.game,
+        },
+        {
+            name: 'online-game',
+            params: { gameId: game.publicId },
+        },
+        chatMessage.player ? pseudoString(chatMessage.player) : 'PlayHex',
+    );
+});

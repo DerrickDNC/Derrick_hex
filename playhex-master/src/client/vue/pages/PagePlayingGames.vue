@@ -1,0 +1,251 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { storeToRefs } from 'pinia';
+import { Game } from '../../../shared/app/models/index.js';
+import usePlayingGamesStore from '../../stores/playingGamesStore.js';
+import AppPseudo from '../components/AppPseudo.vue';
+import AppTimeControlLabel from '../components/AppTimeControlLabel.vue';
+import { IconLightningChargeFill, IconCalendar, IconRobot } from '../icons.js';
+import { formatDistanceToNowStrict } from 'date-fns';
+import { useHead } from '@unhead/vue';
+import { useRouter, useRoute } from 'vue-router';
+import AppGameThumbnailLobbyLiveCard from '../components/AppGameThumbnailLobbyLiveCard.vue';
+import { t } from 'i18next';
+
+useHead({ title: t('playing_games.title') });
+
+/**
+ * Thumbnails displayed above the list, only a single row:
+ * 1 on small screens, 2 on medium, 3 on large, 4 on extra large.
+ * Extra ones are hidden with responsive display classes.
+ */
+const THUMBNAILS_COLUMN_CLASSES = [
+    'col-12 col-sm-6 col-md-4 col-xl-3',
+    'col-sm-6 col-md-4 col-xl-3 d-none d-sm-block',
+    'col-md-4 col-xl-3 d-none d-md-block',
+    'col-xl-3 d-none d-xl-block',
+];
+
+type SortKey = 'recently-started' | 'recently-played' | 'most-moves' | 'longest' | 'player-rating';
+
+/**
+ * Bot games are in their own view, whatever their cadency,
+ * so this is not a TimeControlCadency.
+ */
+type PlayingGamesView = 'live' | 'correspondence' | 'bot';
+
+const playingGamesStore = usePlayingGamesStore();
+const { loading, liveGames, correspondenceGames, botGames } = storeToRefs(playingGamesStore);
+const router = useRouter();
+const route = useRoute();
+const currentLobby = computed<PlayingGamesView>(() => {
+    if (route.params.mode === 'correspondence') return 'correspondence';
+    if (route.params.mode === 'bot') return 'bot';
+    return 'live';
+});
+const sort = ref<SortKey>(route.params.mode === 'correspondence' ? 'most-moves' : 'recently-started');
+const setLobby = (mode: PlayingGamesView) => router.push({ name: 'playing-games', params: { mode } });
+
+onMounted(() => void playingGamesStore.load());
+
+// Bot games events are only received while their view is displayed
+watch(currentLobby, mode => playingGamesStore.watchingBotGames = mode === 'bot', { immediate: true });
+onBeforeUnmount(() => playingGamesStore.watchingBotGames = false);
+
+/**
+ * While not on bot games view, bot games updates are not received,
+ * so their count would go stale: show it as unknown instead.
+ */
+const botGamesCount = computed(() => playingGamesStore.watchingBotGames ? botGames.value.length : '?');
+
+const baseGames = computed(() => {
+    switch (currentLobby.value) {
+        case 'live': return liveGames.value;
+        case 'correspondence': return correspondenceGames.value;
+        case 'bot': return botGames.value;
+    }
+});
+
+const cardTitleKey = computed(() => ({
+    live: 'playing_games.live_games',
+    correspondence: 'playing_games.correspondence_games',
+    bot: 'bot_games',
+})[currentLobby.value]);
+
+const emptyMessageKey = computed(() => ({
+    live: 'playing_games.no_live_games',
+    correspondence: 'playing_games.no_correspondence_games',
+    bot: 'playing_games.no_bot_games',
+})[currentLobby.value]);
+
+const maxRating = (game: Game): number => {
+    return Math.max(
+        ...game.gameToPlayers.map(p => p.player?.currentRating?.rating ?? 1500),
+    );
+};
+
+const sortedGames = computed(() => {
+    const games = [...baseGames.value];
+
+    switch (sort.value) {
+        case 'recently-started':
+            return games.sort((a, b) => {
+                if (!a.startedAt) return 1;
+                if (!b.startedAt) return -1;
+                return b.startedAt.getTime() - a.startedAt.getTime();
+            });
+
+        case 'most-moves':
+            return games.sort((a, b) => b.moves.length - a.moves.length);
+
+        case 'longest':
+            return games.sort((a, b) => {
+                if (!a.startedAt) return 1;
+                if (!b.startedAt) return -1;
+                return a.startedAt.getTime() - b.startedAt.getTime();
+            });
+
+        case 'player-rating':
+            return games.sort((a, b) => maxRating(b) - maxRating(a));
+
+        case 'recently-played':
+            return games.sort((a, b) => {
+                const dateA = a.moveTimestamps[a.moveTimestamps.length - 1] ?? a.startedAt ?? a.createdAt;
+                const dateB = b.moveTimestamps[a.moveTimestamps.length - 1] ?? b.startedAt ?? b.createdAt;
+
+                return dateB.getTime() - dateA.getTime();
+            });
+    }
+});
+
+const thumbnailGames = computed(() => sortedGames.value.slice(0, THUMBNAILS_COLUMN_CLASSES.length));
+</script>
+
+<template>
+    <div class="container-fluid my-3">
+        <h1 class="h3 mb-3">{{ $t('playing_games.title') }}</h1>
+
+        <!-- Type switcher -->
+        <div class="btn-group mb-4" role="group" aria-label="Game type">
+            <button
+                @click="setLobby('live')"
+                class="btn"
+                :class="currentLobby === 'live' ? 'btn-success' : 'btn-outline-secondary'"
+                type="button"
+            >
+                <IconLightningChargeFill /> {{ $t('time_cadency.normal') }}
+                <span class="badge ms-1" :class="currentLobby === 'live' ? 'text-bg-light' : 'text-bg-success'">{{ liveGames.length }}</span>
+            </button>
+            <button
+                @click="setLobby('correspondence')"
+                class="btn"
+                :class="currentLobby === 'correspondence' ? 'btn-warning' : 'btn-outline-secondary'"
+                type="button"
+            >
+                <IconCalendar /> {{ $t('time_cadency.correspondence') }}
+                <span class="badge ms-1" :class="currentLobby === 'correspondence' ? 'text-bg-dark' : 'text-bg-warning'">{{ correspondenceGames.length }}</span>
+            </button>
+            <button
+                @click="setLobby('bot')"
+                class="btn"
+                :class="currentLobby === 'bot' ? 'btn-primary' : 'btn-outline-secondary'"
+                type="button"
+            >
+                <IconRobot /> {{ $t('bot_games') }}
+                <span class="badge ms-1" :class="currentLobby === 'bot' ? 'text-bg-light' : 'text-bg-primary'">{{ botGamesCount }}</span>
+            </button>
+        </div>
+
+        <!-- Games card -->
+        <div class="card">
+            <div class="card-header d-flex align-items-center gap-2 flex-wrap">
+                <span class="fw-bold me-auto">
+                    {{ $t(cardTitleKey) }}
+                    <span class="badge text-bg-secondary ms-1">{{ baseGames.length }}</span>
+                </span>
+
+                <!-- Sort -->
+                <select v-model="sort" class="form-select form-select-sm w-auto">
+                    <option value="recently-started">{{ $t('sort_recently_started') }}</option>
+                    <option value="recently-played">{{ $t('sort_recently_played') }}</option>
+                    <option value="most-moves">{{ $t('sort_most_moves') }}</option>
+                    <option value="longest">{{ $t('sort_longest_game') }}</option>
+                    <option value="player-rating">{{ $t('sort_player_rating') }}</option>
+                </select>
+            </div>
+
+            <div v-if="loading" class="card-body text-secondary">
+                <i>{{ $t('loading') }}</i>
+            </div>
+
+            <div v-else-if="baseGames.length === 0" class="card-body text-secondary">
+                <i>{{ $t(emptyMessageKey) }}</i>
+            </div>
+
+            <!-- First games as thumbnails, a single row depending on screen size -->
+            <div v-else class="card-body pb-0">
+                <div class="row g-2">
+                    <div
+                        v-for="(game, index) in thumbnailGames"
+                        :key="game.publicId"
+                        :class="THUMBNAILS_COLUMN_CLASSES[index]"
+                    >
+                        <AppGameThumbnailLobbyLiveCard :gamePublicId="game.publicId" />
+                    </div>
+                </div>
+            </div>
+
+            <!-- All games as table -->
+            <div v-if="!loading && baseGames.length > 0" class="table-responsive">
+                <table class="table table-borderless table-hover mb-0">
+                    <thead>
+                        <tr class="small text-body-secondary">
+                            <th></th>
+                            <th>{{ $t('game.red') }}</th>
+                            <th>{{ $t('game.blue') }}</th>
+                            <th>{{ $t('game.size') }}</th>
+                            <th>{{ $t('game.time_control') }}</th>
+                            <th>{{ $t('moves') }}</th>
+                            <th>{{ $t('game.duration') }}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="game in sortedGames" :key="game.publicId">
+                            <td>
+                                <router-link
+                                    class="btn btn-sm btn-outline-secondary py-0"
+                                    :to="{ name: 'online-game', params: { gameId: game.publicId } }"
+                                >{{ $t('game.watch') }}</router-link>
+                            </td>
+                            <td>
+                                <AppPseudo v-if="game.gameToPlayers[0]" :player="game.gameToPlayers[0].player" rating classes="text-danger" />
+                            </td>
+                            <td>
+                                <AppPseudo v-if="game.gameToPlayers[1]" :player="game.gameToPlayers[1].player" rating classes="text-primary" />
+                            </td>
+                            <td>{{ game.boardsize }}×{{ game.boardsize }}</td>
+                            <td><AppTimeControlLabel :timeControlBoardsize="game" /></td>
+                            <td class="text-body-secondary small">{{ game.moves.length }}</td>
+                            <td class="text-body-secondary small">{{ game.startedAt ? formatDistanceToNowStrict(game.startedAt) : '–' }}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</template>
+
+<style lang="stylus" scoped>
+.card .table
+    thead
+        th, td
+            color var(--bs-tertiary-color)
+            font-weight 400
+            font-size 1em
+
+    tr:first-child, td:first-child
+        padding-inline-start 1em
+
+    tr:last-child, td:last-child
+        padding-inline-end 1em
+</style>

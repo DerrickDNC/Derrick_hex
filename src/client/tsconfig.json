@@ -1,0 +1,23 @@
+{
+    "extends": "../../tsconfig.json",
+    "compilerOptions": {
+        "target": "ESNext",
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "rootDir": ".",
+        "outDir": "../../dist/client",
+        "types": [
+            "unplugin-icons/types/vue",
+        ],
+        "noEmit": true
+    },
+    "include": [
+        "**/*.ts",
+        "**/*.vue"
+    ],
+    "references": [
+        {
+            "path": "../shared"
+        }
+    ]
+}

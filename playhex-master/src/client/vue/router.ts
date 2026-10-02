@@ -1,0 +1,370 @@
+import { RouteLocationNormalizedLoadedGeneric, RouteRecordRaw, createRouter, createWebHistory } from 'vue-router';
+import { notifyActivity } from '../services/playerActivity.js';
+import { OnlinePlayerPage } from '../../shared/app/OnlinePlayerPage.js';
+
+const routes: RouteRecordRaw[] = [
+    {
+        name: 'home',
+        path: '/',
+        component: () => import('./pages/PageLobby.vue'),
+    },
+    {
+        path: '/',
+        component: () => import('./ReloadOnRouteChange.vue'),
+        children: [
+            {
+                name: 'online-game',
+                path: '/games/:gameId',
+                component: () => import('./pages/PagePlayRemote.vue'),
+                meta: {
+                    displayFooter: false,
+                },
+            },
+            {
+                name: 'player',
+                path: '/@:slug(.{1,32})', // Regex to avoid matching players public ids
+                component: () => import('./pages/player/PagePlayer.vue'),
+            },
+        ],
+    },
+    {
+        path: '/tournaments',
+        component: () => import('./ReloadOnRouteChange.vue'), // When clicking on tournament icon in header, trigger tournament reload if we are on another tournament page
+        children: [
+            {
+                name: 'tournaments',
+                path: '',
+                component: () => import('./tournaments/pages/PageTournaments.vue'),
+            },
+            {
+                name: 'tournaments-create',
+                path: 'create',
+                component: () => import('./tournaments/pages/PageCreateTournament.vue'),
+            },
+            {
+                name: 'tournament',
+                path: ':slug',
+                component: () => import('./tournaments/pages/PageTournament.vue'),
+            },
+            {
+                name: 'tournament-manage',
+                path: ':slug/edit',
+                component: () => import('./tournaments/pages/PageManageTournament.vue'),
+            },
+        ],
+    },
+    {
+        path: '/tournament-series',
+        component: () => import('./ReloadOnRouteChange.vue'),
+        children: [
+            {
+                name: 'tournament-series',
+                path: '',
+                component: () => import('./tournaments/pages/PageTournamentSeriesList.vue'),
+            },
+            {
+                name: 'tournament-series-create',
+                path: 'create',
+                component: () => import('./tournaments/pages/PageCreateTournamentSeries.vue'),
+            },
+            {
+                name: 'tournament-series-show',
+                path: ':slug',
+                component: () => import('./tournaments/pages/PageTournamentSeries.vue'),
+            },
+            {
+                name: 'tournament-series-edit',
+                path: ':slug/edit',
+                component: () => import('./tournaments/pages/PageEditTournamentSeries.vue'),
+            },
+        ],
+    },
+    {
+        name: 'hexplorer',
+        path: '/hexplorer',
+        component: () => import('./hexplorer/pages/PageHexplorer.vue'),
+        meta: {
+            displayFooter: false,
+        },
+    },
+    {
+        name: 'online-players',
+        path: '/online-players',
+        component: () => import('./pages/PageOnlinePlayers.vue'),
+    },
+    {
+        name: 'games-archive',
+        path: '/games-archive',
+        component: () => import('./pages/PageGamesArchive.vue'),
+    },
+    {
+        name: 'statistics',
+        path: '/statistics',
+        component: () => import('./pages/PageStatistics.vue'),
+    },
+    {
+        name: 'playing-games',
+        path: '/playing-games/:mode(live|correspondence|bot)?',
+        component: () => import('./pages/PagePlayingGames.vue'),
+    },
+    {
+        name: 'login',
+        path: '/login',
+        component: () => import('./pages/player/PageLogin.vue'),
+    },
+    {
+        name: 'signup',
+        path: '/signup',
+        component: () => import('./pages/player/PageSignup.vue'),
+    },
+    {
+        name: 'settings',
+        path: '/settings',
+        component: () => import('./pages/player/PageSettings.vue'),
+    },
+    {
+        path: '/',
+        component: () => import('./pages/content/LayoutContent.vue'),
+        children: [
+            {
+                name: 'license',
+                path: 'about/license',
+                component: () => import('./pages/content/PageLicense.vue'),
+            },
+            {
+                name: 'links',
+                path: 'resources/hex-links',
+                component: () => import('./pages/content/PageHexLinks.vue'),
+            },
+            {
+                name: 'rating-simulator',
+                path: 'rating-simulator',
+                component: () => import('./pages/content/PageRatingSimulator.vue'),
+            },
+            {
+                name: 'contribute',
+                path: 'contribute',
+                component: () => import('./pages/content/PageContribute.vue'),
+            },
+            {
+                name: 'contributors',
+                path: 'contributors',
+                component: () => import('./pages/content/PageContributors.vue'),
+            },
+            {
+                name: 'spawn-worker',
+                path: 'spawn-worker',
+                component: () => import('./pages/content/PageSpawnWorker.vue'),
+            },
+            {
+                name: 'analysis-details',
+                path: 'hex-game-analysis',
+                component: () => import('./pages/content/PageAnalysisDetails.vue'),
+            },
+            {
+                name: 'export-games-data',
+                path: 'export-games-data',
+                component: () => import('./pages/content/PageExportGamesData.vue'),
+            },
+            {
+                name: 'privacy',
+                path: 'privacy',
+                component: () => import('./pages/content/PagePrivacyPolicy.vue'),
+            },
+            {
+                name: 'changelog',
+                path: 'changelog',
+                component: () => import('./pages/content/PageChangelog.vue'),
+            },
+        ],
+    },
+    {
+        path: '/guide',
+        component: () => import('./pages/guide/LayoutGuide.vue'),
+        children: [
+            {
+                name: 'guide',
+                path: '',
+                component: () => import('./pages/guide/PageIndex.vue'),
+            },
+            {
+                name: 'guide-ai-analysis',
+                path: 'ai-analysis',
+                component: () => import('./pages/guide/PageAIAnalysis.vue'),
+            },
+            {
+                name: 'guide-conditional-moves',
+                path: 'conditional-moves',
+                component: () => import('./pages/guide/PageConditionalMoves.vue'),
+            },
+            {
+                name: 'guide-moderation',
+                path: 'moderation',
+                component: () => import('./pages/guide/PageModeration.vue'),
+            },
+        ],
+    },
+    {
+        path: '/',
+        component: () => import('./pages/guide/LayoutGuide.vue'),
+        children: [
+            {
+                name: 'landing',
+                path: 'landing',
+                component: () => import('./pages/guide/landing/PageLandingEn.vue'),
+            },
+            {
+                name: 'landing-cs',
+                path: 'cs/landing',
+                component: () => import('./pages/guide/landing/PageLandingCs.vue'),
+            },
+            {
+                name: 'landing-de',
+                path: 'de/landing',
+                component: () => import('./pages/guide/landing/PageLandingDe.vue'),
+            },
+            {
+                name: 'landing-en',
+                path: 'en/landing',
+                component: () => import('./pages/guide/landing/PageLandingEn.vue'),
+            },
+            {
+                name: 'landing-fr',
+                path: 'fr/landing',
+                component: () => import('./pages/guide/landing/PageLandingFr.vue'),
+            },
+            {
+                name: 'landing-ja',
+                path: 'ja/landing',
+                component: () => import('./pages/guide/landing/PageLandingJa.vue'),
+            },
+            {
+                name: 'landing-ko',
+                path: 'ko/landing',
+                component: () => import('./pages/guide/landing/PageLandingKo.vue'),
+            },
+            {
+                name: 'landing-pl',
+                path: 'pl/landing',
+                component: () => import('./pages/guide/landing/PageLandingPl.vue'),
+            },
+            {
+                name: 'landing-tr',
+                path: 'tr/landing',
+                component: () => import('./pages/guide/landing/PageLandingTr.vue'),
+            },
+            {
+                name: 'landing-zh',
+                path: 'zh/landing',
+                component: () => import('./pages/guide/landing/PageLandingZh.vue'),
+            },
+        ],
+    },
+    {
+        name: 'tutorial',
+        path: '/tutorial',
+        component: () => import('./pages/PageTutorial.vue'),
+    },
+    {
+        name: 'offline-lobby',
+        path: '/offline-lobby',
+        component: () => import('./offline-lobby/pages/PageOfflineLobby.vue'),
+    },
+    {
+        name: 'play-vs-offline-ai',
+        path: '/play-vs-ai',
+        component: () => import('./offline-lobby/pages/PagePlayOffline.vue'),
+        meta: {
+            displayFooter: false,
+        },
+    },
+    {
+        name: 'cijm',
+        path: '/tournoi-hex-paris-2025',
+        component: () => import('./pages/content/PageCijm.vue'),
+    },
+    {
+        name: 'cijm2026',
+        path: '/tournoi-hex-paris-2026',
+        component: () => import('./pages/content/PageCijm2026.vue'),
+    },
+    {
+        name: 'rescue',
+        path: '/rescue',
+        component: () => import('./pages/PageRescue.vue'),
+    },
+    {
+        name: 'test',
+        path: '/test',
+        component: () => import('./pages/PageTest.vue'),
+    },
+    {
+        name: 'not-found',
+        path: '/:pathMatch(.*)',
+        component: () => import('./pages/PageNotFound.vue'),
+    },
+];
+
+const querySelectorSilent = (selector: string) => {
+    try {
+        return document.querySelector(selector);
+    } catch (e) {
+        // Ignore error when hash is "invalid", because of e.g a dot, example:
+        // Document.querySelector: '#match-1.6' is not a valid selector
+        return;
+    }
+};
+
+const router = createRouter({
+    history: createWebHistory(),
+    routes,
+    scrollBehavior: async (to, from, savedPosition) => {
+        // In case of browser go back, scroll to last position
+        if (savedPosition) {
+            return {
+                ...savedPosition,
+                behavior: 'instant',
+            };
+        }
+
+        // Scroll to element targeted by hash in url
+        // ex: "/url#settings" will scroll to element with id = "settings"
+        // Check element exists before to prevent a warning
+        if (to.hash && querySelectorSilent(to.hash)) {
+            await new Promise(r => setTimeout(r, 100));
+
+            return {
+                el: to.hash,
+            };
+        }
+
+        // Else, always scroll to top when changing page
+        return {
+            top: 0,
+            behavior: 'instant',
+        };
+    },
+});
+
+// Update player current page if needed (for now, just tells which game page we are watching)
+router.afterEach((to, from, failure) => {
+    if (failure) {
+        return;
+    }
+
+    notifyActivity(getPlayerCurrentPage(to));
+});
+
+const getPlayerCurrentPage = (route: RouteLocationNormalizedLoadedGeneric): OnlinePlayerPage => {
+    if (route.name === 'online-game') {
+        const { gameId } = route.params;
+
+        if (typeof gameId === 'string') {
+            return { page: 'game', gameId };
+        }
+    }
+
+    return null;
+};
+
+export default router;

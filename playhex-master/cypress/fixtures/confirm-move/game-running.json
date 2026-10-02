@@ -1,0 +1,78 @@
+{
+    "publicId": "dcd1701c-dd98-4d6e-8c05-efb887419e2f",
+    "host": {
+        "pseudo": "aa",
+        "publicId": "cec49907-633e-49cb-b720-7dad6c248753",
+        "isGuest": false,
+        "isBot": false,
+        "slug": "aa",
+        "createdAt": "2024-01-24T16:33:29.586Z"
+    },
+    "gameToPlayers": [
+        {
+            "player": {
+                "pseudo": "aa",
+                "publicId": "cec49907-633e-49cb-b720-7dad6c248753",
+                "isGuest": false,
+                "isBot": false,
+                "slug": "aa",
+                "createdAt": "2024-01-24T16:33:29.586Z"
+            }
+        },
+        {
+            "player": {
+                "publicId": "77656f2d-0d80-48ba-b2d3-8f2816ced08c",
+                "isBot": true,
+                "isGuest": false,
+                "pseudo": "Determinist random bot",
+                "slug": "determinist-random-bot",
+                "createdAt": "2023-01-01T00:00:00.000Z"
+            }
+        }
+    ],
+    "timeControl": {
+        "state": "running",
+        "currentPlayer": 0,
+        "players": [
+            {
+                "totalRemainingTime": "2024-01-25T10:42:14.487Z"
+            },
+            {
+                "totalRemainingTime": 600000
+            }
+        ]
+    },
+    "boardsize": 11,
+    "firstPlayer": null,
+    "swapRule": true,
+    "opponentType": "ai",
+    "timeControlType": {
+        "family": "fischer",
+        "options": {
+            "initialTime": 600000,
+            "timeIncrement": 5000,
+            "maxTime": 600000
+        }
+    },
+    "chatMessages": [],
+    "state": "playing",
+    "createdAt": "2024-01-25T10:32:11.323Z",
+    "moves": [
+        "e8",
+        "b4",
+        "f5",
+        "e7"
+    ],
+    "moveTimestamps": [
+        "2024-01-25T10:32:13.386Z",
+        "2024-01-25T10:32:13.386Z",
+        "2024-01-25T10:32:14.487Z",
+        "2024-01-25T10:32:14.487Z"
+    ],
+    "currentPlayerIndex": 0,
+    "winner": null,
+    "outcome": null,
+    "startedAt": "2024-01-25T10:32:11.324Z",
+    "lastMoveAt": "2024-01-25T10:32:14.487Z",
+    "endedAt": null
+}

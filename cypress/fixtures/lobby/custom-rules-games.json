@@ -1,0 +1,230 @@
+[
+    {
+        "publicId": "f45d0703-827b-4da7-b804-48ea6f5e276b",
+        "host": {
+            "pseudo": "Julien",
+            "publicId": "48c68cfc-4401-469f-ba29-1fb184e9d415",
+            "isGuest": false,
+            "isBot": false,
+            "slug": "julien",
+            "createdAt": "2024-02-17T21:49:13.621Z"
+        },
+        "gameToPlayers": [
+            {
+                "player": {
+                    "pseudo": "Julien",
+                    "publicId": "48c68cfc-4401-469f-ba29-1fb184e9d415",
+                    "isGuest": false,
+                    "isBot": false,
+                    "slug": "julien",
+                    "createdAt": "2024-02-17T21:49:13.621Z"
+                }
+            }
+        ],
+        "timeControl": {
+            "state": "ready",
+            "currentPlayer": 0,
+            "players": [
+                {
+                    "totalRemainingTime": 600000
+                },
+                {
+                    "totalRemainingTime": 600000
+                }
+            ]
+        },
+        "boardsize": 11,
+        "firstPlayer": null,
+        "swapRule": true,
+        "opponentType": "player",
+        "timeControlType": {
+            "family": "fischer",
+            "options": {
+                "initialTime": 600000,
+                "timeIncrement": 5000,
+                "maxTime": 600000
+            }
+        },
+        "chatMessages": [],
+        "state": "created",
+        "createdAt": "2024-02-20T20:06:21.075Z",
+        "movesHistory": [],
+        "currentPlayerIndex": 0,
+        "winner": null,
+        "outcome": null,
+        "startedAt": null,
+        "lastMoveAt": null,
+        "endedAt": null
+    },
+    {
+        "publicId": "02a9d462-afe2-46d9-9ab4-723f86b5b8be",
+        "host": {
+            "pseudo": "Julien",
+            "publicId": "48c68cfc-4401-469f-ba29-1fb184e9d415",
+            "isGuest": false,
+            "isBot": false,
+            "slug": "julien",
+            "createdAt": "2024-02-17T21:49:13.621Z"
+        },
+        "gameToPlayers": [
+            {
+                "player": {
+                    "pseudo": "Julien",
+                    "publicId": "48c68cfc-4401-469f-ba29-1fb184e9d415",
+                    "isGuest": false,
+                    "isBot": false,
+                    "slug": "julien",
+                    "createdAt": "2024-02-17T21:49:13.621Z"
+                }
+            }
+        ],
+        "timeControl": {
+            "state": "ready",
+            "currentPlayer": 0,
+            "players": [
+                {
+                    "totalRemainingTime": 600000
+                },
+                {
+                    "totalRemainingTime": 600000
+                }
+            ]
+        },
+        "boardsize": 12,
+        "firstPlayer": null,
+        "swapRule": false,
+        "opponentType": "player",
+        "timeControlType": {
+            "family": "fischer",
+            "options": {
+                "initialTime": 600000,
+                "timeIncrement": 5000,
+                "maxTime": 600000
+            }
+        },
+        "chatMessages": [],
+        "state": "created",
+        "createdAt": "2024-02-20T20:06:28.192Z",
+        "movesHistory": [],
+        "currentPlayerIndex": 0,
+        "winner": null,
+        "outcome": null,
+        "startedAt": null,
+        "lastMoveAt": null,
+        "endedAt": null
+    },
+    {
+        "publicId": "6cbc0c65-d20d-40d8-bcb0-8d93f8b08f05",
+        "host": {
+            "pseudo": "Julien",
+            "publicId": "48c68cfc-4401-469f-ba29-1fb184e9d415",
+            "isGuest": false,
+            "isBot": false,
+            "slug": "julien",
+            "createdAt": "2024-02-17T21:49:13.621Z"
+        },
+        "gameToPlayers": [
+            {
+                "player": {
+                    "pseudo": "Julien",
+                    "publicId": "48c68cfc-4401-469f-ba29-1fb184e9d415",
+                    "isGuest": false,
+                    "isBot": false,
+                    "slug": "julien",
+                    "createdAt": "2024-02-17T21:49:13.621Z"
+                }
+            }
+        ],
+        "timeControl": {
+            "state": "ready",
+            "currentPlayer": 0,
+            "players": [
+                {
+                    "totalRemainingTime": 600000
+                },
+                {
+                    "totalRemainingTime": 600000
+                }
+            ]
+        },
+        "boardsize": 13,
+        "firstPlayer": 0,
+        "swapRule": false,
+        "opponentType": "player",
+        "timeControlType": {
+            "family": "fischer",
+            "options": {
+                "initialTime": 600000,
+                "timeIncrement": 5000,
+                "maxTime": 600000
+            }
+        },
+        "chatMessages": [],
+        "state": "created",
+        "createdAt": "2024-02-20T20:06:33.517Z",
+        "movesHistory": [],
+        "currentPlayerIndex": 0,
+        "winner": null,
+        "outcome": null,
+        "startedAt": null,
+        "lastMoveAt": null,
+        "endedAt": null
+    },
+    {
+        "publicId": "56c8982b-3979-4368-b4f8-80f2e2771d34",
+        "host": {
+            "pseudo": "Julien",
+            "publicId": "48c68cfc-4401-469f-ba29-1fb184e9d415",
+            "isGuest": false,
+            "isBot": false,
+            "slug": "julien",
+            "createdAt": "2024-02-17T21:49:13.621Z"
+        },
+        "gameToPlayers": [
+            {
+                "player": {
+                    "pseudo": "Julien",
+                    "publicId": "48c68cfc-4401-469f-ba29-1fb184e9d415",
+                    "isGuest": false,
+                    "isBot": false,
+                    "slug": "julien",
+                    "createdAt": "2024-02-17T21:49:13.621Z"
+                }
+            }
+        ],
+        "timeControl": {
+            "state": "ready",
+            "currentPlayer": 0,
+            "players": [
+                {
+                    "totalRemainingTime": 600000
+                },
+                {
+                    "totalRemainingTime": 600000
+                }
+            ]
+        },
+        "boardsize": 25,
+        "firstPlayer": null,
+        "swapRule": true,
+        "opponentType": "player",
+        "timeControlType": {
+            "family": "fischer",
+            "options": {
+                "initialTime": 600000,
+                "timeIncrement": 5000,
+                "maxTime": 600000
+            }
+        },
+        "chatMessages": [],
+        "state": "created",
+        "createdAt": "2024-02-20T20:06:41.429Z",
+        "movesHistory": [],
+        "currentPlayerIndex": 0,
+        "winner": null,
+        "outcome": null,
+        "startedAt": null,
+        "lastMoveAt": null,
+        "endedAt": null
+    }
+]

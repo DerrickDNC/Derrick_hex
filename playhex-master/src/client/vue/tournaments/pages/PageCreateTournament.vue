@@ -1,0 +1,89 @@
+<script setup lang="ts">
+import { ref, useTemplateRef } from 'vue';
+import { apiPostTournament } from '../../../apiClient.js';
+import { useRouter } from 'vue-router';
+import { DomainHttpError } from '../../../../shared/app/DomainHttpError.js';
+import { t } from 'i18next';
+import { createTournamentDefaultsCreate } from '../../../../shared/app/models/Tournament.js';
+import { useHead } from '@unhead/vue';
+import AppTournamentForm from '../components/AppTournamentForm.vue';
+import type { ComponentExposed } from 'vue-component-type-helpers';
+import useToastsStore from '../../../stores/toastsStore.js';
+
+const tournament = ref(createTournamentDefaultsCreate());
+
+useHead({
+    title: () => tournament.value.title ?? t('tournament_create'),
+});
+
+const router = useRouter();
+const tournamentForm = useTemplateRef<ComponentExposed<typeof AppTournamentForm>>('tournamentForm');
+
+// submit
+const createTournament = async (): Promise<void> => {
+    if (!tournamentForm.value) {
+        throw new Error('Missing element with ref tournamentForm');
+    }
+
+    if (!await tournamentForm.value.validateTournament()) {
+        return;
+    }
+
+    try {
+        const created = await apiPostTournament(tournament.value);
+
+        if (created === null) {
+            throw new Error('Could not create tournament');
+        }
+
+        void router.push({
+            name: 'tournament',
+            params: {
+                slug: created.slug,
+            },
+        });
+
+        useToastsStore().addToast(
+            'Tournament created successfully.',
+            {
+                level: 'success',
+            },
+        );
+    } catch (e) {
+        if (e instanceof DomainHttpError) {
+            if (e.type === 'tournament_slug_duplicate') {
+                useToastsStore().addToast(
+                    t('tournament_slug_duplicate'),
+                    {
+                        level: 'danger',
+                    },
+                );
+
+                window.scrollTo(0, 0);
+                return;
+            }
+        }
+
+        useToastsStore().addToast(
+            'Error while creating tournament',
+            {
+                level: 'danger',
+            },
+        );
+
+        throw e;
+    }
+};
+</script>
+
+<template>
+    <div class="container my-3">
+        <h1>Create Tournament</h1>
+
+        <form @submit.prevent="createTournament">
+            <AppTournamentForm :tournament ref="tournamentForm" />
+
+            <button type="submit" class="btn btn-success">Create tournament</button>
+        </form>
+    </div>
+</template>

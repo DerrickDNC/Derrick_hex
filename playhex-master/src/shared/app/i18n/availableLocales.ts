@@ -1,0 +1,167 @@
+import { Locale } from 'date-fns';
+
+type DefaultExportLocale = Promise<{ default: Locale }>;
+
+export type Translator = {
+    fullName: string;
+    link?: `http${string}`;
+};
+
+type AvailableLocales = {
+    [locale: string]: {
+        label: string;
+        loader: () => DefaultExportLocale;
+        translators?: Translator[];
+    };
+};
+
+/**
+ * Should be sorted by label.
+ *
+ * - Locale key must have same name a translation file
+ *
+ * - Label is displayed to player in select menu.
+ *      Should use form "<utf8 flag> <native name> (<english name>)".
+ *      Native names are listed i.e here: https://matomo.org/translations/
+ *      Flags can be copied from i.e here: https://emojipedia.org/search?q=poland
+ *
+ * - Loader is file used for date-fns, to translate date/times
+ *
+ * - Translators are people who contributed through Weblate or directly on Github.
+ *      They are added manually, but those from Weblate can be listed with:
+ *      https://hosted.weblate.org/projects/playhex/#reports (left menu, JSON, since beginning).
+ */
+export const availableLocales: AvailableLocales = {
+    ar: {
+        label: '🇸🇦 العربية (Arabic)',
+        loader: () => import('date-fns/locale/ar') as unknown as DefaultExportLocale,
+    },
+    cs: {
+        label: '🇨🇿 Čeština (Czech)',
+        loader: () => import('date-fns/locale/cs') as unknown as DefaultExportLocale,
+    },
+    da: {
+        label: '🇩🇰 Dansk (Danish)',
+        loader: () => import('date-fns/locale/da') as unknown as DefaultExportLocale,
+        translators: [
+            { fullName: 'Kristoffer Marboe', link: 'https://github.com/KrisMarboe' },
+        ],
+    },
+    de: {
+        label: '🇩🇪 Deutsch (German)',
+        loader: () => import('date-fns/locale/de') as unknown as DefaultExportLocale,
+        translators: [
+            { fullName: 'Ettore Atalan', link: 'https://hosted.weblate.org/user/Atalanttore/' },
+            { fullName: 'Peter Selinger', link: 'https://playhex.org/@quasar' },
+        ],
+    },
+    en: {
+        label: '🇺🇸 English',
+        loader: () => import('date-fns/locale/en-US') as unknown as DefaultExportLocale,
+    },
+    es: {
+        label: '🇪🇸 Español (Spanish)',
+        loader: () => import('date-fns/locale/es') as unknown as DefaultExportLocale,
+        translators: [
+            { fullName: 'gallegonovato', link: 'https://hosted.weblate.org/user/gallegonovato/' },
+            { fullName: 'Guille', link: 'https://hosted.weblate.org/user/guillevg/' },
+            { fullName: '2swap', link: 'http://localhost:3000/@2swap' },
+            { fullName: 'Marco', link: 'https://hosted.weblate.org/user/60825138Mmm./' },
+            { fullName: 'pipebits', link: 'https://github.com/pipebits' },
+        ],
+    },
+    fr: {
+        label: '🇫🇷 Français (French)',
+        loader: () => import('date-fns/locale/fr') as unknown as DefaultExportLocale,
+        translators: [
+            { fullName: 'Julien Maulny', link: 'https://playhex.org/@alcalyn' },
+        ],
+    },
+    fi: {
+        label: '🇫🇮 Suomi (Finnish)',
+        loader: () => import('date-fns/locale/fi') as unknown as DefaultExportLocale,
+    },
+    hu: {
+        label: '🇭🇺 Magyar (Hungarian)',
+        loader: () => import('date-fns/locale/hu') as unknown as DefaultExportLocale,
+    },
+    id: {
+        label: '🇮🇩 Indonesia (Indonesian)',
+        loader: () => import('date-fns/locale/id') as unknown as DefaultExportLocale,
+        translators: [
+            { fullName: '2swap', link: 'http://localhost:3000/@2swap' },
+            { fullName: 'Arif Budiman', link: 'https://github.com/arifpedia' },
+        ],
+    },
+    it: {
+        label: '🇮🇹 Italiano (Italian)',
+        loader: () => import('date-fns/locale/it') as unknown as DefaultExportLocale,
+    },
+    ko: {
+        label: '🇰🇷 한국어 (Korean)',
+        loader: () => import('date-fns/locale/ko') as unknown as DefaultExportLocale,
+    },
+    nl: {
+        label: '🇳🇱 Nederlands (Dutch)',
+        loader: () => import('date-fns/locale/nl') as unknown as DefaultExportLocale,
+        translators: [
+            { fullName: 'Ebbe Steenhoudt', link: 'https://ebbdrop.com/' },
+        ],
+    },
+    pl: {
+        label: '🇵🇱 Polski (Polish)',
+        loader: () => import('date-fns/locale/pl') as unknown as DefaultExportLocale,
+        translators: [
+            { fullName: 'FlyPside', link: 'https://playhex.org/@flypside' },
+            { fullName: 'Eryk Michalak', link: 'https://hosted.weblate.org/user/gnu-ewm/' },
+            { fullName: 'BlackHat', link: 'https://playhex.org/@blackhat' },
+            { fullName: 'Demon Batuty', link: 'https://hosted.weblate.org/user/przemek15a/' },
+            { fullName: 'Cootje17a', link: 'https://github.com/Cootje17a' },
+        ],
+    },
+    pt: {
+        label: '🇵🇹 Português (Portuguese)',
+        loader: () => import('date-fns/locale/pt') as unknown as DefaultExportLocale,
+    },
+    ru: {
+        label: '🇷🇺 Русский (Russian)',
+        loader: () => import('date-fns/locale/ru') as unknown as DefaultExportLocale,
+        translators: [
+            { fullName: 'Maksim Кабанов', link: 'https://hosted.weblate.org/user/law820314/' },
+            { fullName: 'igorantonow314', link: 'https://hosted.weblate.org/user/igorantonow314/' },
+            { fullName: 'vanapro1', link: 'https://hosted.weblate.org/user/vanapro1/' },
+        ],
+    },
+    sv: {
+        label: '🇸🇪 Svenska (Swedish)',
+        loader: () => import('date-fns/locale/sv') as unknown as DefaultExportLocale,
+        translators: [
+            { fullName: 'Luna Jernberg', link: 'https://github.com/bittin' },
+        ],
+    },
+    tr: {
+        label: '🇹🇷 Türkçe (Turkish)',
+        loader: () => import('date-fns/locale/tr') as unknown as DefaultExportLocale,
+        translators: [
+            { fullName: 'AtomGutan', link: 'https://hosted.weblate.org/user/kmete2105/' },
+        ],
+    },
+    ja: {
+        label: '🇯🇵 日本語 (Japanese)',
+        loader: () => import('date-fns/locale/ja') as unknown as DefaultExportLocale,
+        translators: [
+            { fullName: 'Enpitu Mr', link: 'https://hosted.weblate.org/user/mr.enpitu/' },
+        ],
+    },
+    'zh-Hans': {
+        label: '🇨🇳 简体中文 (Chinese)',
+        loader: () => import('date-fns/locale/zh-CN') as unknown as DefaultExportLocale,
+    },
+    ta: {
+        label: '🇮🇳 தமிழ் (Tamil)',
+        loader: () => import('date-fns/locale/ta') as unknown as DefaultExportLocale,
+        translators: [
+            { fullName: 'TamilNeram', link: 'https://hosted.weblate.org/user/TamilNeram/' },
+        ],
+    },
+};

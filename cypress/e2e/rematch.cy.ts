@@ -1,0 +1,237 @@
+describe('Rematch', () => {
+
+    /*
+        // Coordinates generated with this code placed on "PagePlayRemote.vue" file:
+
+        const clickHistory: { x: number, y: number }[] = [];
+        window.onclick = ({ clientX, clientY }) => {
+            clickHistory.push({ x: clientX, y: clientY });
+
+            console.log(
+                clickHistory
+                    .map(c => `cy.play(${c.x}, ${c.y});\n`)
+                    .join('')
+                ,
+            );
+        };
+    */
+
+    it('reverses colors from previous game if colors were random', () => {
+        cy.visit('/');
+        cy.containsGuestPseudo('.menu-top');
+
+        cy.contains('Ranked vs AI').click();
+
+        cy
+            .contains('h5', 'Ranked vs AI')
+            .closest('.modal-content')
+            .contains('Determinist')
+            .click()
+        ;
+
+        cy
+            .contains('h5', 'Ranked vs AI')
+            .closest('.modal-content')
+            .contains('button', 'Play ranked vs AI')
+            .click()
+        ;
+
+        cy.contains('.sidebar', 'Playing');
+
+        // Must play diagonal line to win both as red or blue because we can't choose our color on ranked games
+        cy.play(217, 297);
+        cy.play(247, 314);
+        cy.play(189, 278);
+        cy.play(159, 266);
+        cy.play(127, 245);
+        cy.play(275, 332);
+        cy.play(307, 347);
+        cy.play(335, 363);
+        cy.play(365, 382);
+        cy.play(393, 398);
+        cy.play(425, 417);
+
+        cy.contains('Game finished');
+        cy.containsGuestPseudo(null, /GUEST wins!/);
+
+        cy.contains('Game finished').closest('.modal-content').contains('Close').click();
+
+        // Rematch should reverse players colors.
+        let previousFirstPlayer: string;
+        let currentFirstPlayer: string;
+
+        cy
+            .get('.game-info-overlay .player-a .text-danger')
+            .invoke('text')
+            .invoke('trim')
+            .then(p => previousFirstPlayer = p)
+        ;
+
+
+        cy.contains('Rematch').click();
+        cy.contains('.sidebar', 'Playing');
+
+        cy
+            .get('.game-info-overlay .player-a .text-danger')
+            .invoke('text')
+            .invoke('trim')
+            .then(p => currentFirstPlayer = p)
+        ;
+
+        // toast should not appear for player who sent the rematch offer
+        cy
+            .contains(/(challenged you to a rematch|sent a rematch offer)/, { timeout: 100 })
+            .should('not.exist')
+        ;
+
+        cy.then(() => {
+            if (previousFirstPlayer === currentFirstPlayer) {
+                throw new Error('Players have not switched color after rematch');
+            }
+        });
+    });
+
+    it('keeps same colors when "host plays first"', () => {
+        cy.visit('/');
+        cy.containsGuestPseudo('.menu-top');
+
+        cy.createAIGameWithRandom(false);
+
+        cy
+            .contains('h5', 'Play vs AI')
+            .closest('.modal-content')
+            .contains('Custom')
+            .click()
+
+            .closest('.modal-content')
+            .get('input[type=number]')
+            .clear()
+            .type('4')
+
+            .closest('.modal-content')
+            .contains('More options')
+            .click()
+        ;
+
+        cy
+            .contains('h5', 'Play vs AI')
+            .closest('.modal-content')
+            .contains(/^First$/)
+            .click()
+        ;
+
+        cy.submitAIGame();
+
+        cy.play(236, 308);
+        cy.play(321, 355);
+        cy.play(399, 305);
+        cy.play(153, 259);
+
+        cy.contains('Game finished');
+        cy.containsGuestPseudo(null, /GUEST wins!/);
+
+        cy.contains('Game finished').closest('.modal-content').contains('Close').click();
+
+        // Rematch should reverse players colors.
+        let previousFirstPlayer: string;
+        let currentFirstPlayer: string;
+
+        // I am red
+        cy
+            .get('.game-info-overlay .player-a .text-danger')
+            .invoke('text')
+            .invoke('trim')
+            .then(p => previousFirstPlayer = p)
+        ;
+
+
+        cy.contains('Rematch').click();
+        cy.contains('.sidebar', 'Playing');
+
+        // I am still red
+        cy
+            .get('.game-info-overlay .player-a .text-danger')
+            .invoke('text')
+            .invoke('trim')
+            .then(p => currentFirstPlayer = p)
+        ;
+
+        cy.then(() => {
+            if (previousFirstPlayer !== currentFirstPlayer) {
+                throw new Error('Players have switched color after rematch');
+            }
+        });
+    });
+
+    it('keeps same colors when "host plays second" and host rematch', () => {
+        cy.visit('/');
+        cy.containsGuestPseudo('.menu-top');
+
+        cy.createAIGameWithRandom(false);
+
+        cy
+            .contains('h5', 'Play vs AI')
+            .closest('.modal-content')
+            .contains('Custom')
+            .click()
+
+            .closest('.modal-content')
+            .get('input[type=number]')
+            .clear()
+            .type('4')
+
+            .closest('.modal-content')
+            .contains('More options')
+            .click()
+        ;
+
+        cy
+            .contains('h5', 'Play vs AI')
+            .closest('.modal-content')
+            .contains(/^Second$/)
+            .click()
+        ;
+
+        cy.submitAIGame();
+
+        cy.play(320, 355);
+        cy.play(239, 305);
+        cy.play(237, 210);
+        cy.play(404, 405);
+
+        cy.contains('Game finished');
+        cy.containsGuestPseudo(null, /GUEST wins!/);
+
+        cy.contains('Game finished').closest('.modal-content').contains('Close').click();
+
+        // Rematch should reverse players colors.
+        let previousFirstPlayer: string;
+        let currentFirstPlayer: string;
+
+        // I am blue
+        cy
+            .get('.game-info-overlay .player-b .text-primary')
+            .invoke('text')
+            .invoke('trim')
+            .then(p => previousFirstPlayer = p)
+        ;
+
+
+        cy.contains('Rematch').click();
+        cy.contains('.sidebar', 'Playing');
+
+        // I am still blue
+        cy
+            .get('.game-info-overlay .player-b .text-primary')
+            .invoke('text')
+            .invoke('trim')
+            .then(p => currentFirstPlayer = p)
+        ;
+
+        cy.then(() => {
+            if (previousFirstPlayer !== currentFirstPlayer) {
+                throw new Error('Players have switched color after rematch');
+            }
+        });
+    });
+});

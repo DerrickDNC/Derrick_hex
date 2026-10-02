@@ -1,0 +1,107 @@
+{
+    "publicId": "00000000-0000-0000-0000-000000000000",
+    "host": {
+        "pseudo": "ddd",
+        "publicId": "d811df6d-be5d-4916-8734-ac002ebe26b7",
+        "isGuest": false,
+        "isBot": false,
+        "slug": "ddd",
+        "createdAt": "2024-03-25T20:03:25.194Z"
+    },
+    "gameToPlayers": [
+        {
+            "player": {
+                "pseudo": "Random bot",
+                "publicId": "53ccc84c-c73b-40b2-9ee2-21ca2182ac85",
+                "isGuest": false,
+                "isBot": true,
+                "slug": "random-bot",
+                "createdAt": "2023-01-01T00:00:00.000Z",
+                "aiConfig": {
+                    "playerId": 703,
+                    "engine": "random",
+                    "order": 30,
+                    "label": "Random",
+                    "description": "plays randomly",
+                    "boardsizeMin": null,
+                    "boardsizeMax": null,
+                    "requireMorePower": false,
+                    "isRemote": false,
+                    "config": {
+                        "determinist": false
+                    }
+                }
+            }
+        },
+        {
+            "player": {
+                "pseudo": "ddd",
+                "publicId": "d811df6d-be5d-4916-8734-ac002ebe26b7",
+                "isGuest": false,
+                "isBot": false,
+                "slug": "ddd",
+                "createdAt": "2024-03-25T20:03:25.194Z"
+            }
+        }
+    ],
+    "timeControl": {
+        "state": "running",
+        "currentPlayer": 1,
+        "players": [
+            {
+                "totalRemainingTime": 600000
+            },
+            {
+                "totalRemainingTime": "2024-03-28T11:17:00.158Z"
+            }
+        ]
+    },
+    "boardsize": 11,
+    "firstPlayer": null,
+    "swapRule": true,
+    "opponentType": "ai",
+    "opponentPublicId": "53ccc84c-c73b-40b2-9ee2-21ca2182ac85",
+    "timeControlType": {
+        "family": "fischer",
+        "options": {
+            "initialTime": 600000,
+            "timeIncrement": 5000,
+            "maxTime": 600000
+        }
+    },
+    "chatMessages": [],
+    "state": "playing",
+    "createdAt": "2024-03-28T11:06:58.317Z",
+    "moves": [
+        "a7",
+        "f6",
+        "h11",
+        "h9",
+        "c2",
+        "k1",
+        "j10",
+        "e5",
+        "f2",
+        "c9",
+        "e10"
+    ],
+    "moveTimestamps": [
+        "2024-03-28T11:06:58.319Z",
+        "2024-03-28T11:06:58.912Z",
+        "2024-03-28T11:06:58.913Z",
+        "2024-03-28T11:06:59.302Z",
+        "2024-03-28T11:06:59.303Z",
+        "2024-03-28T11:06:59.550Z",
+        "2024-03-28T11:06:59.551Z",
+        "2024-03-28T11:06:59.835Z",
+        "2024-03-28T11:06:59.836Z",
+        "2024-03-28T11:07:00.156Z",
+        "2024-03-28T11:07:00.157Z"
+    ],
+    "currentPlayerIndex": 1,
+    "winner": null,
+    "outcome": null,
+    "startedAt": "2024-03-28T11:06:58.318Z",
+    "lastMoveAt": "2024-03-28T11:07:00.158Z",
+    "endedAt": null
+}

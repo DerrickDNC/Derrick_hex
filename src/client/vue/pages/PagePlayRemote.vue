@@ -1,0 +1,839 @@
+<script setup lang="ts">
+import 'bootstrap/js/dist/dropdown.js';
+import useLobbyStore from '../../stores/lobbyStore.js';
+import { ref, computed, watch } from 'vue';
+import AppBoard from '../components/AppBoard.vue';
+import ConfirmationOverlay from '../components/overlay/ConfirmationOverlay.vue';
+import { defineOverlay } from '@overlastic/vue';
+import { Ref, watchEffect } from 'vue';
+import useAuthStore from '../../stores/authStore.js';
+import { useRoute, useRouter } from 'vue-router';
+import { IconFlag, IconXLg, IconCheck, IconArrowBarLeft, IconRepeat, IconArrowCounterclockwise, IconRewind, IconList, IconArrowDownUp, IconSignpostSplit } from '../icons.js';
+import usePlayerLocalSettingsStore from '../../stores/playerLocalSettingsStore.js';
+import { storeToRefs } from 'pinia';
+import { t } from 'i18next';
+import { injectHead, useSeoMeta } from '@unhead/vue';
+import AppGameSidebar from '../components/AppGameSidebar.vue';
+import AppConnectionAlert from '../components/AppConnectionAlert.vue';
+import { Game } from '../../../shared/app/models/index.js';
+import { pseudoString } from '../../../shared/app/pseudoUtils.js';
+import { apiPostRematch, getPlayer } from '../../apiClient.js';
+import { canJoin, isChallengeGame, getPlayers, shouldShowConditionalMoves, isGuestBlockedFromRegisteredOnlyGame, isBotGame, canShowHexworldLink, canShowHexplorerLink } from '../../../shared/app/gameUtils.js';
+import { useGuestJoiningCorrespondenceWarning } from '../composables/guestJoiningCorrespondenceWarning.js';
+import useCurrentGameStore from '../../stores/currentGameStore.js';
+import { useGameViewOrientation } from '../composables/useGameViewOrientation.js';
+import AppHexWorldExplore from '../components/AppHexWorldExplore.vue';
+import AppHexplorerLink from '../hexplorer/components/AppHexplorerLink.vue';
+import { computeTimeControlAtMoveIndex } from '../../../shared/app/gameUtils.js';
+import { type GameTimeData } from '../../../shared/time-control/TimeControl.js';
+
+const head = injectHead();
+
+const { gameId } = useRoute().params;
+
+if (Array.isArray(gameId)) {
+    throw new Error('unexpected array param in gameId');
+}
+
+const {
+    engineGame,
+    game,
+    gameView,
+    simulatePlayingGameFacade,
+
+    players,
+    localPlayerIndex,
+    shouldDisplayConfirmMove,
+    confirmMove,
+    canCancel,
+    canDeclineChallenge,
+    shouldDisplayUndoMove,
+    shouldEnableUndoMove,
+    canResign,
+    canRematch,
+    shouldShowPass,
+    shouldEnablePass,
+    unreadMessages,
+    isReadingChatMessages,
+} = storeToRefs(useCurrentGameStore());
+
+const {
+    useGame,
+
+    askUndo,
+    sendPass,
+    sendResign,
+    sendCancel,
+    enableSimulationMode,
+    startConditionalMoves,
+} = useCurrentGameStore();
+
+const lobbyStore = useLobbyStore();
+const { loggedInPlayer } = storeToRefs(useAuthStore());
+
+const router = useRouter();
+const orientation = useGameViewOrientation(gameView);
+
+/*
+ * Confirm move
+ */
+const { localSettings } = usePlayerLocalSettingsStore();
+
+useGame(gameId);
+
+/*
+ * Clock replay: show time remaining at the rewinded position when replaying a finished game.
+ */
+const simulationMainCursor = ref<number>(0);
+
+const onMainCursorChanged = (index: number) => {
+    simulationMainCursor.value = index;
+};
+
+watch(simulatePlayingGameFacade, (facade, oldFacade) => {
+    oldFacade?.off('mainCursorChanged', onMainCursorChanged);
+    if (facade) {
+        simulationMainCursor.value = facade.getMainCursor();
+        facade.on('mainCursorChanged', onMainCursorChanged);
+    } else {
+        simulationMainCursor.value = 0;
+    }
+}, { immediate: true });
+
+/**
+ * When the "Accept" button is not shown on a waiting game (state "created"),
+ * explain why, instead of showing nothing.
+ * canJoin() alone drives whether we show anything at all; the few checks below
+ * only pick which text to display, they do not re-decide whether joining is possible.
+ */
+const cannotJoinReasonType = computed<null
+    | 'cannot_join_registered_only'
+    | 'cannot_join_reason.not_logged_in'
+    | 'cannot_join_reason.is_host'
+    | 'cannot_join_reason.reserved_for_other_player'
+    | 'cannot_join_reason.other'
+    | 'cannot_join_reason.game_canceled'
+>(() => {
+    if (!game.value) {
+        return null;
+    }
+
+    if (game.value.state === 'canceled') {
+        return 'cannot_join_reason.game_canceled';
+    }
+
+    if (game.value.state !== 'created') {
+        return null;
+    }
+
+    if (isGuestBlockedFromRegisteredOnlyGame(game.value, loggedInPlayer.value)) {
+        return 'cannot_join_registered_only';
+    }
+
+    if (canJoin(game.value, loggedInPlayer.value)) {
+        return null;
+    }
+
+    if (!loggedInPlayer.value) {
+        return 'cannot_join_reason.not_logged_in';
+    }
+
+    if (game.value.host?.publicId === loggedInPlayer.value.publicId) {
+        return 'cannot_join_reason.is_host';
+    }
+
+    if (isChallengeGame(game.value) && game.value.opponentPublicId !== loggedInPlayer.value.publicId) {
+        return 'cannot_join_reason.reserved_for_other_player';
+    }
+
+    return 'cannot_join_reason.other';
+});
+
+/**
+ * Pseudo of the targeted opponent, fetched by publicId, when relevant to the displayed reason.
+ */
+const cannotJoinOpponentPseudo = ref<null | string>(null);
+
+watch([cannotJoinReasonType, game], async ([reasonType, game]) => {
+    cannotJoinOpponentPseudo.value = null;
+
+    if (reasonType !== 'cannot_join_reason.is_host' && reasonType !== 'cannot_join_reason.reserved_for_other_player') {
+        return;
+    }
+
+    if (!game || game.opponentPublicId === null) {
+        return;
+    }
+
+    try {
+        const opponent = await getPlayer(game.opponentPublicId);
+        cannotJoinOpponentPseudo.value = pseudoString(opponent, 'pseudo');
+    } catch (e) {
+        // Could not fetch opponent, fall back to a generic message without pseudo.
+    }
+}, { immediate: true });
+
+const cannotJoinReasonKey = computed<null | string>(() => {
+    const type = cannotJoinReasonType.value;
+
+    if (!type) {
+        return null;
+    }
+
+    if (type === 'cannot_join_reason.is_host' && cannotJoinOpponentPseudo.value) {
+        return 'cannot_join_reason.is_host_challenge';
+    }
+
+    if (type === 'cannot_join_reason.reserved_for_other_player' && cannotJoinOpponentPseudo.value) {
+        return 'cannot_join_reason.reserved_for_other_player_named';
+    }
+
+    return type;
+});
+
+/**
+ * Whether the "Accept" button itself should render.
+ * Registered-only games block guests entirely now: show the reason instead of a disabled button.
+ */
+const showAcceptButton = computed<boolean>(() => {
+    if (!game.value) {
+        return false;
+    }
+
+    return canJoin(game.value, loggedInPlayer.value)
+        && !isGuestBlockedFromRegisteredOnlyGame(game.value, loggedInPlayer.value)
+    ;
+});
+
+const effectiveTimeControlValues = computed<null | GameTimeData>(() => {
+    if (!game.value?.timeControl) return null;
+    if (!simulatePlayingGameFacade.value || game.value.state !== 'ended') {
+        return game.value.timeControl;
+    }
+    return computeTimeControlAtMoveIndex(game.value, simulationMainCursor.value);
+});
+
+const makeTitle = (game: Game) => {
+    const players = game.gameToPlayers.map(h => h.player);
+    const { state } = game;
+    const playerPseudos = players.map(p => pseudoString(p, 'pseudo'));
+    if (players.length < 2 && state === 'created')
+        return `${t('game.title_waiting')} ${playerPseudos[0]}`;
+    let yourTurn = '';
+    if (state === 'playing' && loggedInPlayer.value != null) {
+        const player = loggedInPlayer.value;
+        const index = players.findIndex(p => p.publicId === player.publicId);
+        if (index != null && game.currentPlayerIndex === index) {
+            yourTurn = `• ${t('game.title_your_turn')} • `;
+        }
+    }
+    const pairing = playerPseudos.join(' VS ');
+    return `${yourTurn}${t('game_state.' + state)}: ${pairing}`;
+};
+
+/*
+ * Set page title and seo fields
+ */
+watch(game, game => {
+    if (!game) {
+        return;
+    }
+
+    const playerPseudos = getPlayers(game).map(p => p.pseudo);
+    const { state, host } = game;
+    const description = state === 'created'
+        ? `Hex game, hosted by ${host?.pseudo ?? 'system'}, waiting for an opponent.`
+        : `Hex game, ${playerPseudos.join(' versus ')}.`
+    ;
+
+    useSeoMeta({
+        title: computed(() => {
+            if (game == null) return '';
+            return makeTitle(game);
+        }),
+        description,
+        ogDescription: description,
+    }, { head });
+});
+
+
+/*
+ * Join game
+ */
+const join = async () => {
+    if (game.value === null) {
+        return;
+    }
+
+    if (isGuestJoiningCorrepondence(game.value)) {
+        try {
+            await createGuestJoiningCorrepondenceWarningOverlay();
+        } catch (e) {
+            return;
+        }
+    }
+
+    return lobbyStore.joinGame(game.value.publicId);
+};
+
+const confirmationOverlay = defineOverlay(ConfirmationOverlay);
+
+/*
+ * Resign
+ */
+const resign = async (): Promise<void> => {
+    if (localPlayerIndex.value === null) {
+        return;
+    }
+
+    try {
+        await confirmationOverlay({
+            title: t('resign_confirm_overlay.title'),
+            message: t('resign_confirm_overlay.message'),
+            confirmLabel: t('resign_confirm_overlay.confirmLabel'),
+            confirmClass: 'btn-danger',
+            cancelLabel: t('resign_confirm_overlay.cancelLabel'),
+            cancelClass: 'btn-outline-primary',
+        });
+
+        await sendResign();
+    } catch (e) {
+        // resignation canceled
+    }
+};
+
+/*
+ * Cancel
+ */
+const cancel = async (): Promise<void> => {
+    try {
+        await confirmationOverlay({
+            title: 'Cancel game',
+            message: 'Are you sure you want to cancel the game?',
+            confirmLabel: 'Yes, cancel',
+            confirmClass: 'btn-warning',
+            cancelLabel: 'No, keep the game',
+            cancelClass: 'btn-outline-primary',
+        });
+    } catch (e) {
+        // cancelation canceled
+        return;
+    }
+
+    await sendCancel();
+};
+
+/*
+ * Decline challenge
+ */
+const declineChallenge = async (): Promise<void> => {
+    await sendCancel();
+};
+
+/*
+ * Rematch
+ */
+const canAcceptRematch: Ref<boolean> = ref(false);
+const rematchRequestOngoing = ref(false);
+
+watchEffect(() => {
+    if (!game.value) return;
+    const rematch = game.value.rematch ?? null;
+    if (rematch == null) return;
+    if (loggedInPlayer.value == null) return;
+    if (localPlayerIndex.value === null) return;
+    canAcceptRematch.value = canJoin(rematch, loggedInPlayer.value);
+});
+
+const createOrAcceptRematch = async (): Promise<void> => {
+    if (!game.value) {
+        throw new Error('Error while trying to rematch, no current game');
+    }
+
+    const rematchId = game.value.rematch?.publicId ?? null;
+    let gameRematch: null | Game = null;
+
+    try {
+        rematchRequestOngoing.value = true;
+
+        if (rematchId != null) {
+            gameRematch = await lobbyStore.getOrFetchGame(rematchId);
+
+            if (gameRematch == null) {
+                throw new Error('A rematch game does not exist');
+            }
+        } else {
+            gameRematch = await apiPostRematch(game.value.publicId);
+        }
+    } finally {
+        rematchRequestOngoing.value = false;
+    }
+
+    if (canJoin(gameRematch, loggedInPlayer.value)) {
+        await lobbyStore.joinGame(gameRematch.publicId);
+    }
+
+    await router.push({
+        name: 'online-game',
+        params: {
+            gameId: gameRematch.publicId,
+        },
+    });
+};
+
+/*
+ * Sidebar
+ */
+const showSidebar = (open = true): void => {
+    localSettings.openSidebar = open;
+};
+
+const isSidebarCurrentlyOpen = computed<boolean>(() => {
+    if (undefined !== localSettings.openSidebar) {
+        return localSettings.openSidebar;
+    }
+
+    return window.screen.width >= 576;
+});
+
+watch(isSidebarCurrentlyOpen, () => {
+    isReadingChatMessages.value = isSidebarCurrentlyOpen.value;
+}, {
+    immediate: true,
+});
+
+/*
+ * Pass
+ */
+const pass = async () => {
+    // No confirmation needed against a bot: nothing is asked to a human opponent.
+    if (isPlayingVsBot.value) {
+        await sendPass();
+        return;
+    }
+
+    try {
+        await confirmationOverlay({
+            title: t('pass_confirm_overlay.title'),
+            message: t('pass_confirm_overlay.message'),
+            confirmLabel: t('pass_confirm_overlay.confirmLabel'),
+            confirmClass: 'btn-warning',
+            cancelLabel: t('pass_confirm_overlay.cancelLabel'),
+            cancelClass: 'btn-outline-primary',
+        });
+
+        await sendPass();
+    } catch (e) {
+        // noop, player said no
+    }
+};
+
+/*
+ * Takeback
+ */
+const takeback = async () => {
+    // No confirmation needed against a bot: the takeback is applied right away.
+    if (isPlayingVsBot.value) {
+        await askUndo();
+        return;
+    }
+
+    try {
+        await confirmationOverlay({
+            title: t('undo.takeback_confirm_overlay.title'),
+            message: t('undo.takeback_confirm_overlay.message'),
+            confirmLabel: t('undo.takeback_confirm_overlay.confirmLabel'),
+            confirmClass: 'btn-primary',
+            cancelLabel: t('undo.takeback_confirm_overlay.cancelLabel'),
+            cancelClass: 'btn-outline-primary',
+        });
+
+        await askUndo();
+    } catch (e) {
+        // noop, player said no
+    }
+};
+
+const isPlayingVsBot = computed<boolean>(() => game.value !== null
+    && isBotGame(game.value),
+);
+
+/**
+ * In games against a bot, takeback is a common action: always show it in the bottom bar.
+ * In games against a human, it stays in the secondary actions menu.
+ */
+const shouldDisplayUndoMoveInBar = computed<boolean>(() => shouldDisplayUndoMove.value
+    && isPlayingVsBot.value,
+);
+
+const shouldDisplayUndoMoveInMenu = computed<boolean>(() => shouldDisplayUndoMove.value
+    && !shouldDisplayUndoMoveInBar.value,
+);
+
+const shouldShowHexworldLink = computed<boolean>(() => engineGame.value !== null
+    && game.value !== null
+    && canShowHexworldLink(game.value, loggedInPlayer.value),
+);
+
+const shouldShowHexplorerLink = computed<boolean>(() => engineGame.value !== null
+    && game.value !== null
+    && canShowHexplorerLink(game.value, loggedInPlayer.value),
+);
+
+/**
+ * Do not render the secondary actions menu when it would be empty.
+ */
+const hasSecondaryActions = computed<boolean>(() => shouldShowPass.value
+    || shouldDisplayUndoMoveInMenu.value
+    || shouldShowHexworldLink.value
+    || shouldShowHexplorerLink.value,
+);
+
+/*
+ * Warning when guest joining correspondence game
+ */
+const {
+    createGuestJoiningCorrepondenceWarningOverlay,
+    isGuestJoiningCorrepondence,
+} = useGuestJoiningCorrespondenceWarning();
+</script>
+
+<template>
+    <div v-show="game" class="game-and-sidebar-container" :class="localSettings.openSidebar ? 'sidebar-open' : (undefined === localSettings.openSidebar ? 'sidebar-auto' : 'sidebar-closed')">
+        <div class="game bg-body">
+
+            <!-- Game board, "Accept" button -->
+            <div class="board-container">
+                <AppBoard
+                    v-if="game"
+                    :players
+                    :timeControlOptions="game.timeControlType"
+                    :timeControlValues="effectiveTimeControlValues"
+                    :gameView="gameView"
+                />
+
+                <div v-if="game && (showAcceptButton || canDeclineChallenge || cannotJoinReasonKey)" class="join-button-container">
+                    <div class="d-flex flex-column align-items-center gap-2">
+                        <button
+                            v-if="showAcceptButton"
+                            class="btn btn-lg"
+                            :class="isGuestJoiningCorrepondence(game) ? 'btn-outline-warning' : 'btn-success'"
+                            @click="join()"
+                        >{{ $t('game.accept') }}</button>
+
+                        <p v-else-if="cannotJoinReasonKey" class="text-center mb-0">{{ $t(cannotJoinReasonKey, { pseudo: cannotJoinOpponentPseudo }) }}</p>
+
+                        <button
+                            v-if="canDeclineChallenge"
+                            type="button"
+                            class="btn btn-outline-warning"
+                            @click="declineChallenge()"
+                        >{{ $t('decline_challenge') }}</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Control buttons at bottom of game board (resign, undo, confirm move, ...) -->
+            <nav class="menu-game navbar" v-if="game">
+                <div class="buttons container-fluid">
+
+                    <!-- Left spacer, same width as the right one so that the buttons stay centered -->
+                    <div class="buttons-side" aria-hidden="true"></div>
+
+                    <div class="buttons-main">
+
+                        <!-- rewind mode -->
+                        <button type="button" v-if="null !== gameView" @click="() => enableSimulationMode()" class="btn btn-outline-primary">
+                            <IconRewind />
+                        </button>
+
+                        <!-- Conditional moves -->
+                        <button type="button" v-if="loggedInPlayer && shouldShowConditionalMoves(game, loggedInPlayer)" @click="startConditionalMoves()" class="btn btn-outline-primary">
+                            <IconSignpostSplit />
+                        </button>
+
+                        <!-- Resign -->
+                        <button type="button" class="btn btn-outline-danger" v-if="canResign && !canCancel" @click="resign()">
+                            <IconFlag />
+                            <span class="hide-sm">{{ ' ' + $t('resign') }}</span>
+                        </button>
+
+                        <!-- Cancel -->
+                        <button type="button" class="btn btn-outline-warning" v-if="canCancel" @click="cancel()">
+                            <IconXLg />
+                            <span class="hide-sm">{{ ' ' + $t('cancel') }}</span>
+                        </button>
+
+                        <!-- Confirm move -->
+                        <button
+                            v-if="shouldDisplayConfirmMove"
+                            :class="confirmMove ? 'btn-success' : 'btn-outline-secondary'"
+                            :disabled="!confirmMove"
+                            @click="confirmMove && confirmMove()"
+                            type="button"
+                            class="btn"
+                        >
+                            <IconCheck />
+                            <span class="hide-sm">
+                                <span class="d-md-none">{{ ' ' + $t('confirm_move.button_label_short') }}</span>
+                                <span class="d-none d-md-inline">{{ ' ' + $t('confirm_move.button_label') }}</span>
+                            </span>
+                        </button>
+
+                        <!-- Takeback, always shown in bottom bar in games against a bot -->
+                        <button
+                            v-if="shouldDisplayUndoMoveInBar"
+                            type="button"
+                            class="btn btn-outline-primary"
+                            :disabled="!shouldEnableUndoMove"
+                            @click="takeback()"
+                        >
+                            <IconArrowCounterclockwise />
+                            <span class="hide-sm">{{ ' ' + $t('undo.undo_move') }}</span>
+                        </button>
+
+                        <!-- Rematch -->
+                        <button type="button" class="btn btn-outline-primary" v-if="canRematch" @click="createOrAcceptRematch()" :disabled="rematchRequestOngoing">
+                            <IconRepeat />
+                            <span class="hide-sm">{{ ' ' + $t('rematch.label') }}</span>
+                        </button>
+
+                        <!-- Accept / View rematch -->
+                        <template v-else-if="game.rematch?.publicId">
+                            <button v-if="canAcceptRematch" type="button" class="btn btn-success" @click="createOrAcceptRematch()" :disabled="rematchRequestOngoing">
+                                {{ ' ' + $t('rematch.accept') }}
+                            </button>
+                            <router-link v-else :to="{ name: 'online-game', params: { gameId: game.rematch.publicId } }" class="btn btn-outline-primary">
+                                {{ ' ' + $t('rematch.view') }}
+                            </router-link>
+                        </template>
+
+                        <!-- Secondary actions dropup -->
+                        <div class="dropup" v-if="hasSecondaryActions">
+
+                            <!-- Dropup button -->
+                            <button type="button" class="btn btn-outline-primary dropdown-toggle" data-bs-toggle="dropdown" aria-label="Secondary actions" aria-expanded="false" data-bs-auto-close="true">
+                                <IconList />
+                            </button>
+
+                            <!-- Secondary actions -->
+                            <div class="dropdown-menu dropdown-menu-end">
+
+                                <!-- Pass -->
+                                <button
+                                    v-if="shouldShowPass"
+                                    type="button"
+                                    class="dropdown-item"
+                                    :class="shouldEnablePass ? 'text-warning' : 'text-secondary disabled'"
+                                    :disabled="!shouldEnablePass"
+                                    @click="pass()"
+                                >
+                                    <IconArrowDownUp />
+                                    {{ $t('pass') }}
+                                </button>
+
+                                <div v-if="shouldShowPass && shouldDisplayUndoMoveInMenu"><hr class="dropdown-divider"></div>
+
+                                <!-- Undo -->
+                                <button
+                                    v-if="shouldDisplayUndoMoveInMenu"
+                                    type="button"
+                                    class="dropdown-item"
+                                    :class="shouldEnableUndoMove ? 'text-primary' : 'disabled'"
+                                    :disabled="!shouldEnableUndoMove"
+                                    @click="takeback()"
+                                >
+                                    <IconArrowCounterclockwise />
+                                    {{ $t('undo.undo_move') }}
+                                </button>
+
+                                <div v-if="(shouldShowHexworldLink || shouldShowHexplorerLink) && (shouldShowPass || shouldDisplayUndoMoveInMenu)"><hr class="dropdown-divider"></div>
+
+                                <!-- Explore -->
+                                <AppHexWorldExplore
+                                    v-if="engineGame"
+                                    :game
+                                    :engineGame
+                                    :orientation
+                                    :label="$t('explore')"
+                                    class="dropdown-item"
+                                />
+
+                                <!-- Hexplorer -->
+                                <AppHexplorerLink
+                                    v-if="engineGame"
+                                    :game
+                                    :orientation
+                                    class="dropdown-item"
+                                />
+                            </div>
+                        </div>
+
+                    </div>
+
+                    <!-- Right button, open sidebar -->
+                    <div class="buttons-side buttons-side-right">
+                        <button type="button" class="btn btn-outline-primary open-sidebar-btn" @click="showSidebar()" aria-label="Open game sidebar and chat">
+                            <IconArrowBarLeft />
+                            <span v-if="unreadMessages > 0" class="position-absolute top-0 start-0 translate-middle badge rounded-pill bg-danger">
+                                {{ unreadMessages }}
+                                <span class="d-none">{{ ' ' + $t('unread_messages') }}</span>
+                            </span>
+                        </button>
+                    </div>
+
+                </div>
+            </nav>
+        </div>
+
+        <!-- Game sidebar -->
+        <div class="sidebar bg-body" v-if="game && gameView">
+            <AppGameSidebar
+                :game
+                :gameView
+                @close="showSidebar(false)"
+            />
+        </div>
+    </div>
+
+    <div v-if="!game" class="container-fluid my-3">
+        <p class="lead text-center">{{ $t('loading_game') }}</p>
+    </div>
+
+    <AppConnectionAlert />
+</template>
+
+<style scoped lang="stylus">
+.join-button-container
+    top 15%
+    position absolute
+    width 100%
+    background rgba(0, 0, 0, 0.1)
+    padding 1em 0
+
+.board-container
+    position relative // center "Accept" button relative to this container
+    height calc(100vh - 6rem) // (fallback if dvh is not supported)
+    height calc(100dvh - 6rem) // 6rem = header and bottom game menu height
+
+.menu-game
+    // Mobile UI fix: add margin at bottom if url bar is present,
+    // so it is possible to scroll to hide url bar and set full height again,
+    // then the UI will fit 100vh again.
+    margin-bottom calc(100lvh - 100dvh)
+
+.buttons
+    position relative
+    display flex
+    flex-wrap nowrap // .navbar > .container-fluid wraps by default, buttons must stay on a single line
+    align-items center
+    justify-content center
+    gap 0.5em
+
+    // Keep the secondary actions menu inside the viewport on small screens
+    .dropdown-menu
+        max-width calc(100vw - 1rem)
+
+// Buttons stay centered in the bar: both sides take the same amount of free space.
+// When there is no room left, the left one shrinks to nothing and the buttons are
+// simply pushed left, instead of overlapping the "open sidebar" button.
+.buttons-side
+    display flex
+    flex 1 1 0
+    min-width 0
+
+.buttons-side-right
+    justify-content flex-end
+    min-width min-content // never shrink below the "open sidebar" button, so it stays fully visible on the right
+
+.buttons-main
+    display flex
+    flex-wrap nowrap
+    flex 0 0 auto
+    justify-content center
+    gap 0.5em
+
+.game-and-sidebar-container
+    position relative
+    display flex
+
+    .game
+        width 100%
+
+    .sidebar
+        display none
+        height calc(100vh - 3rem) // (fallback if dvh is not supported)
+        height calc(100dvh - 3rem) // 3rem = header height
+
+    .open-sidebar-btn
+        position relative // anchor the unread messages badge
+
+sidebarOpen()
+    .game
+        width 100%
+
+        @media (min-width: 576px)
+            width 50%
+
+        @media (min-width: 992px)
+            width 55%
+
+        @media (min-width: 1200px)
+            width 64%
+
+        @media (min-width: 1400px)
+            width 68%
+
+    .sidebar
+        display flex
+        position relative
+        width 100%
+
+        @media (max-width: 575.5px) // .5 is a fix because sometimes 575px only is not inclusive
+            position absolute
+            right 0
+            top 0
+            bottom 0
+            --bs-bg-opacity 0.85
+            // backdrop-filter blur(2px) // laggy on mobile
+
+        @media (min-width: 576px)
+            width 50%
+
+        @media (min-width: 992px)
+            width 45%
+
+        @media (min-width: 1200px)
+            width 36%
+
+        @media (min-width: 1400px)
+            width 32%
+
+    .buttons-side
+        display none
+
+.sidebar-open
+    sidebarOpen()
+
+.sidebar-auto
+    @media (min-width: 576px)
+        sidebarOpen()
+
+// Custom hidden when limited space:
+// hide on small screen, and medium screen when sidebar is open.
+.game-and-sidebar-container
+    &.sidebar-closed
+        .hide-sm
+            display none
+
+            @media (min-width: 576px)
+                display unset
+
+    &.sidebar-open, &.sidebar-auto
+        .hide-sm
+            display none
+
+            @media (min-width: 992px)
+                display unset
+
+</style>

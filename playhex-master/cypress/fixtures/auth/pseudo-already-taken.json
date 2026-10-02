@@ -1,0 +1,5 @@
+{
+    "success": false,
+    "reason": "This username is already used by another player",
+    "type": "pseudo_already_taken"
+}

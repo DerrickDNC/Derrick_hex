@@ -1,0 +1,30 @@
+/**
+ * Top and down menus.
+ */
+.menu-top, .menu-game
+    padding 0.25rem 0
+
+    & > div
+        height 2.5rem
+
+    p
+        margin 0
+
+.card-bg-icon
+    overflow hidden
+    position relative
+
+    & > svg
+        font-size 10em
+        position absolute
+        top -2rem
+        right 0
+        opacity 15%
+
+svg
+    vertical-align -0.125em
+
+// Toast with centered icon + left text:
+// fix icon not centered when text is not taking full width
+.toast-body
+    width 100%

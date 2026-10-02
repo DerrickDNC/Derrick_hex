@@ -1,0 +1,138 @@
+import { defineStore } from 'pinia';
+import { Component, ref } from 'vue';
+import { v4 as uuidv4 } from 'uuid';
+import { BootstrapLevel } from '../../shared/app/bootstrapLevels.js';
+import { RouteLocationAsRelativeTyped } from 'vue-router';
+
+const useToastsStore = defineStore('toastsStore', () => {
+
+    const toasts = ref<Toast[]>([]);
+
+    const addToast = (message: string, options?: Partial<ToastOptions>): void => {
+        const toast = createToast(message, options);
+
+        if (toast.options.tag) {
+            toasts.value
+                .filter(t => t.options.tag === toast.options.tag)
+                .forEach(deleteToast)
+            ;
+        }
+
+        toasts.value.push(toast);
+
+        if (toast.options.autoCloseAfter > 0) {
+            setInterval(() => deleteToast(toast), toast.options.autoCloseAfter);
+        }
+    };
+
+    const deleteToast = (toast: Toast): void => {
+        toast.show = false;
+
+        setTimeout(() => {
+            toasts.value = toasts.value.filter(t => toast.id !== t.id);
+        }, 150);
+    };
+
+    return {
+        toasts,
+        addToast,
+        deleteToast,
+    };
+
+});
+
+export type ToastOptions = {
+    /**
+     * Color of toast
+     */
+    level: BootstrapLevel;
+
+    /**
+     * In milliseconds, automatically close toast.
+     * Defaults to 4000. Use 0 to disable auto-close (toast stays until manually dismissed).
+     */
+    autoCloseAfter: number;
+
+    /**
+     * Shows a big animated icon in the toast, e.g when a player joined my game
+     */
+    icon?: Component;
+
+    /**
+     * Whether to show the close button (X).
+     * Defaults to true.
+     */
+    closable: boolean;
+
+    /**
+     * If set, showing a new toast with the same tag
+     * removes the previous one with this tag,
+     * to prevent accumulating too many toasts for the same kind of event/error.
+     */
+    tag?: string;
+
+    /**
+     * Show links or buttons.
+     *
+     * No action: no button, click on toast will just dismiss it.
+     * 1 action: 1 button, and clicking on toast will perform this action.
+     * 2+ actions: a button for each action, clicking on toast itself is ignored.
+     */
+    actions: {
+        /**
+         * Text in the button
+         */
+        label: string;
+
+        /**
+         * Callback: shows a button that call callback on click
+         * Url: navigate to this url
+         */
+        action: RouteLocationAsRelativeTyped | (() => void);
+
+        /**
+         * Add classes to button. Defaults to "btn btn-link text-body"
+         */
+        classes?: string;
+    }[];
+};
+
+export type Toast = {
+    /**
+     * Unique id, used as vue key in for loop
+     */
+    id: string;
+
+    /**
+     * To delete toast, first set it to false to show fading animation
+     */
+    show: boolean;
+
+    /**
+     * Text to display
+     */
+    message: string;
+
+    options: ToastOptions;
+};
+
+const createToast = (message: string, options?: Partial<ToastOptions>): Toast => {
+    return {
+        id: uuidv4(),
+        show: true,
+        message,
+        options: {
+            ...defaultToastOptions,
+            ...options,
+        },
+    };
+};
+
+const defaultToastOptions: ToastOptions = {
+    level: 'info',
+    autoCloseAfter: 4000,
+    closable: true,
+    actions: [],
+};
+
+export default useToastsStore;

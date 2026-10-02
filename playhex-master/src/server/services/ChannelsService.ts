@@ -1,0 +1,96 @@
+import { Repository } from 'typeorm';
+import { Channel, ChannelChatMessage } from '../../shared/app/models/index.js';
+import { Inject, Service } from 'typedi';
+import ChannelChatMessageRepository from '../repositories/ChannelChatMessageRepository.js';
+import { languagesCodesISO6391 } from '../../shared/app/codes.js';
+import TournamentStore from '../store/TournamentStore.js';
+import { CHANNEL_LAST_MESSAGES_COUNT, CHANNEL_OLDER_MESSAGES_PAGE_SIZE } from '../../shared/app/channelUtils.js';
+
+export class ChannelNotFoundError extends Error {}
+
+@Service()
+export class ChannelsService
+{
+    constructor(
+        private channelChatMessageRepository: ChannelChatMessageRepository,
+        private tournamentStore: TournamentStore,
+
+        @Inject('Repository<Channel>')
+        private channelRepository: Repository<Channel>,
+    ) {}
+
+    async getLastMessages(channelName: string): Promise<ChannelChatMessage[]>
+    {
+        const recentMessages = await this.channelChatMessageRepository
+            .findLastMessages(channelName, CHANNEL_LAST_MESSAGES_COUNT)
+        ;
+
+        return recentMessages.reverse();
+    }
+
+    /**
+     * Messages posted before a given date, used to load older messages.
+     */
+    async getMessagesBefore(channelName: string, before: Date): Promise<ChannelChatMessage[]>
+    {
+        const olderMessages = await this.channelChatMessageRepository
+            .findLastMessages(channelName, CHANNEL_OLDER_MESSAGES_PAGE_SIZE, before)
+        ;
+
+        return olderMessages.reverse();
+    }
+
+    /**
+     * @throws {ChannelNotFoundError} If channel not existing (and cannot be auto created)
+     */
+    async getChannel(channelName: string): Promise<Channel>
+    {
+        return await this.loadOrCreateChannelIfAllowed(channelName);
+    }
+
+    private async loadOrCreateChannelIfAllowed(channelName: string): Promise<Channel>
+    {
+        let channel = await this.channelRepository.findOne({
+            where: { name: channelName },
+        });
+
+        if (channel) {
+            return channel;
+        }
+
+        if (!await this.allowedToAutoCreateChannel(channelName)) {
+            throw new ChannelNotFoundError(`No channel "${channelName}"`);
+        }
+
+        channel = new Channel();
+
+        channel.name = channelName;
+
+        return await this.channelRepository.save(channel);
+    }
+
+    /**
+     * Create channel in database if needed,
+     * instead of being forced to do it manually when installing project.
+     */
+    private async allowedToAutoCreateChannel(channelName: string): Promise<boolean>
+    {
+        // Allow "lobby-en", "lobby-.." as soon as language code is valid
+        const lobbyByLanguage = channelName.match(/^lobby-([a-z]{2})$/);
+
+        if (lobbyByLanguage) {
+            return languagesCodesISO6391.has(lobbyByLanguage[1]);
+        }
+
+        // Allow tournament channels "tourament-[slug]"
+        const tournament = channelName.match(/^tournament-(.*)$/);
+
+        if (tournament) {
+            const slug = tournament[1];
+
+            return await this.tournamentStore.slugExists(slug);
+        }
+
+        return false;
+    };
+}

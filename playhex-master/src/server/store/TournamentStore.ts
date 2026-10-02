@@ -1,0 +1,254 @@
+import { Inject, Service } from 'typedi';
+import { Player, Tournament, TournamentSeries } from '../../shared/app/models/index.js';
+import { by, errorToLogger } from '../../shared/app/utils.js';
+import { ActiveTournament } from '../tournaments/ActiveTournament.js';
+import logger from '../services/logger.js';
+import { AppDataSource } from '../data-source.js';
+import { createTournamentFromCreateInput } from '../../shared/app/models/Tournament.js';
+import { getTournamentEngine } from '../tournaments/organizers/getTournamentEngine.js';
+import { ActiveTournamentsFilters, isFeaturedNow, isPlayerInvolved, tournamentMatchKey } from '../../shared/app/tournamentUtils.js';
+import { addTournamentHistory } from '../../shared/app/models/TournamentHistory.js';
+import { pseudoString } from '../../shared/app/pseudoUtils.js';
+import type { GameAccessorInterface } from '../tournaments/game-accessor/GameAccessorInterface.js';
+import { GameAccessor } from '../tournaments/game-accessor/GameAccessor.js';
+import { AutoSave } from '../auto-save/AutoSave.js';
+import TournamentRepository from '../repositories/TournamentRepository.js';
+
+@Service()
+export default class TournamentStore
+{
+    /**
+     * Upcoming and active tournaments, then archived.
+     */
+    private activeTournaments: { [tournamentPublicId: string]: ActiveTournament } = {};
+
+    constructor(
+        private tournamentRepository: TournamentRepository,
+
+        @Inject(() => GameAccessor)
+        private gameAccessor: GameAccessorInterface,
+    ) {
+        this.loadActiveTournaments().catch(e => {
+            logger.error('Error while loading tournaments', errorToLogger(e));
+        });
+    }
+
+    private async loadActiveTournaments()
+    {
+        logger.info('Loading tournaments from database to memory...');
+
+        await AppDataSource.initialize();
+
+        const tournaments = await this.tournamentRepository.findActiveTournaments();
+
+        for (const tournament of tournaments) {
+            try {
+                this.activeTournaments[tournament.publicId] = await this.createActiveTournament(tournament);
+            } catch (e) {
+                logger.error('Tournament could not be loaded, skipping', errorToLogger(e));
+            }
+        }
+
+        logger.info('Loaded tournaments in memory', { tournamentsCount: tournaments.length });
+    }
+
+    async persistAllTournaments(): Promise<boolean>
+    {
+        logger.info('Persisting all tournaments...');
+
+        let allSuccess = true;
+
+        for (const key in this.activeTournaments) {
+            try {
+                await this.activeTournaments[key].save();
+            } catch (e) {
+                allSuccess = false;
+                logger.error('Could not persist a tournament. Continue with others.', { ...errorToLogger(e), tournamentPublicId: key });
+            }
+        }
+
+        logger.info('Tournament persisting done.');
+
+        return allSuccess;
+    }
+
+    private async createActiveTournament(tournament: Tournament): Promise<ActiveTournament>
+    {
+        // Replace instance of game by same instance of game from active games
+        for (const tournamentMatch of tournament.matches) {
+            const { game } = tournamentMatch;
+
+            if (game === null) {
+                continue;
+            }
+
+            const gameServer = this.gameAccessor.getGameServer(game.publicId);
+
+            if (gameServer === null) {
+                if (game.state !== 'ended') {
+                    logger.warning('Could not find tournament active game', {
+                        tournamentPublicId: game.publicId,
+                        gameState: game.state,
+                        matchNumber: tournamentMatchKey(tournamentMatch),
+                    });
+                }
+
+                continue;
+            }
+
+            tournamentMatch.game = gameServer.getGame();
+        }
+
+        const activeTournament = new ActiveTournament(
+            tournament,
+            getTournamentEngine(tournament),
+            this.gameAccessor,
+            new AutoSave(() => this.save(tournament)),
+        );
+
+        await activeTournament.init();
+
+        return activeTournament;
+    }
+
+    /**
+     * Get all active tournaments.
+     */
+    getActiveTournaments(filters?: ActiveTournamentsFilters): Tournament[]
+    {
+        const tournaments: Tournament[] = [];
+
+        for (const activeTournament of Object.values(this.activeTournaments)) {
+            const tournament = activeTournament.getTournament();
+
+            // If playerUuid filter is provided, exclude tournaments where this player is not in
+            if (undefined !== filters?.playerPublicId) {
+                if (!isPlayerInvolved(tournament, filters.playerPublicId)) {
+                    continue;
+                }
+            }
+
+            // If featured filter is provided, exclude tournaments not featured, or not too soon to feature now
+            if (undefined !== filters?.featured) {
+                if (!isFeaturedNow(tournament)) {
+                    continue;
+                }
+            }
+
+            tournaments.push(tournament);
+        }
+
+        tournaments.sort(by(tournament => tournament.startOfficialAt.getTime()));
+
+        return tournaments;
+    }
+
+    getActiveTournament(publicId: string): null | ActiveTournament
+    {
+        return this.activeTournaments[publicId] ?? null;
+    }
+
+    getActiveTournamentBySlug(slug: string): null | ActiveTournament
+    {
+        for (const activeTournament of Object.values(this.activeTournaments)) {
+            if (activeTournament.getTournament().slug === slug) {
+                return activeTournament;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Find tournament by slug, from memory or database.
+     * Returns null if no tournament with this slug.
+     *
+     * If not in memory, fetch from database with all relations.
+     */
+    async findBySlugFull(slug: string): Promise<null | Tournament>
+    {
+        for (const publicId in this.activeTournaments) {
+            if (this.activeTournaments[publicId].getTournament().slug === slug) {
+                return this.activeTournaments[publicId].getTournament();
+            }
+        }
+
+        return await this.tournamentRepository.findBySlugFull(slug);
+    }
+
+    /**
+     * Find tournament by slug, from memory or database.
+     * Returns null if no tournament with this slug.
+     *
+     * If not in memory, fetch from database only tournament data, no relation.
+     */
+    async findBySlug(slug: string): Promise<null | Tournament>
+    {
+        for (const publicId in this.activeTournaments) {
+            if (this.activeTournaments[publicId].getTournament().slug === slug) {
+                return this.activeTournaments[publicId].getTournament();
+            }
+        }
+
+        return await this.tournamentRepository.findBySlug(slug);
+    }
+
+    async slugExists(slug: string): Promise<boolean>
+    {
+        for (const publicId in this.activeTournaments) {
+            if (this.activeTournaments[publicId].getTournament().slug === slug) {
+                return true;
+            }
+        }
+
+        return await this.tournamentRepository.slugExists(slug);
+    }
+
+    /**
+     * For active tournaments,
+     * should call activeTournament.save() instead
+     * to prevent persist concurrencies.
+     */
+    async save(tournament: Tournament): Promise<Tournament>
+    {
+        logger.info('Persisting a tournament...', { publicId: tournament.publicId });
+
+        const result = await this.tournamentRepository.save(tournament);
+
+        logger.info('Tournament persisting done', { publicId: tournament.publicId, id: result.id });
+
+        return result;
+    }
+
+    async createTournament(tournament: Tournament, organizer: Player, series: null | TournamentSeries = null): Promise<Tournament>
+    {
+        tournament = createTournamentFromCreateInput(tournament);
+
+        tournament.createdAt = new Date();
+        tournament.organizer = organizer;
+        tournament.series = series;
+        tournament.featuredFromInSeconds = series?.featuredFromInSeconds ?? 0;
+
+        addTournamentHistory(tournament, 'created', {
+            organizerPseudo: pseudoString(organizer),
+            organizerPublicId: organizer.publicId,
+        }, tournament.createdAt);
+
+        tournament = await this.save(tournament);
+
+        this.activeTournaments[tournament.publicId] = await this.createActiveTournament(tournament);
+
+        return tournament;
+    }
+
+    async cancelActiveTournament(activeTournament: ActiveTournament): Promise<void>
+    {
+        const tournament = activeTournament.getTournament();
+
+        activeTournament.cancelGamesAndCancelTournament();
+
+        await activeTournament.save();
+
+        delete this.activeTournaments[tournament.publicId];
+    }
+}

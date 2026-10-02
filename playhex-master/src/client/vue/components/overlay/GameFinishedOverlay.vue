@@ -1,0 +1,77 @@
+<script setup lang="ts">
+import { PropType } from 'vue';
+import { useDisclosure } from '@overlastic/vue';
+import AppPseudo from '../AppPseudo.vue';
+import Player from '../../../../shared/app/models/Player.js';
+import { EngineGame } from '../../../../shared/game-engine/index.js';
+import AppPlayerAvatar from '../AppPlayerAvatar.vue';
+
+const { visible, confirm } = useDisclosure();
+
+const props = defineProps({
+    engineGame: {
+        type: EngineGame,
+        required: true,
+    },
+    players: {
+        type: Array as PropType<Player[]>,
+        required: true,
+    },
+});
+
+const { players, engineGame } = props;
+
+const winner: null | Player = engineGame.isCanceled()
+    ? null
+    : players[engineGame.getStrictWinner()]
+;
+
+</script>
+
+<template>
+    <div v-if="visible">
+        <div class="modal d-block" @click="confirm()">
+            <div class="modal-dialog" @click="e => e.stopPropagation()">
+                <form class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">{{ $t('game_finished_overlay.title') }}</h5>
+                        <button type="button" class="btn-close" @click="confirm()"></button>
+                    </div>
+                    <div class="modal-body text-center">
+                        <AppPlayerAvatar
+                            v-if="winner?.avatarPath"
+                            :player="winner"
+                        />
+                        <p v-if="null !== winner" class="lead m-0">
+                            <i18next :translation="$t('player_wins_by.' + (engineGame.getOutcome() ?? 'default'))">
+                                <template #player>
+                                    <AppPseudo
+                                        :player="winner"
+                                        is="strong"
+                                        flag
+                                        :classes="0 === engineGame.getStrictWinner() ? 'text-danger' : 'text-primary'"
+                                    />
+                                </template>
+                            </i18next>
+                        </p>
+                        <p v-else>{{ $t('game_has_been_canceled') }}</p>
+                    </div>
+                    <div class="modal-footer justify-content-center">
+                        <button
+                            type="button"
+                            class="btn btn-outline-primary"
+                            @click="confirm()"
+                        >{{ $t('close') }}</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <div class="modal-backdrop show d-fixed"></div>
+    </div>
+</template>
+
+<style lang="stylus" scoped>
+:deep(.player-avatar)
+    width 8em
+    margin-bottom 0.5rem
+</style>

@@ -1,0 +1,11 @@
+dist
+.env
+node_modules
+*.log
+cypress/screenshots/
+size-stats-*.json
+var/
+/assets/export-data/
+/assets/stats/
+tsconfig.tsbuildinfo
+assets/avatars/

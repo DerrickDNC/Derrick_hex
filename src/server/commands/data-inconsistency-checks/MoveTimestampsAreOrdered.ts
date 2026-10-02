@@ -1,0 +1,67 @@
+import { Inject, Service } from 'typedi';
+import { Repository } from 'typeorm';
+import { Game } from '../../../shared/app/models/index.js';
+import { DataInconsistenciesCheckerInterface } from './DataInconsistenciesCheckerInterface.js';
+
+/**
+ * In some games, move playedAt were not ordered in two cases:
+ *
+ * - There was a bug with swap-pieces and pass moves: playedAt date was set to now
+ *      when retrieved from database, so next persist has replaced it by now,
+ *      which was a future date.
+ *
+ *      In this case we need to retrieve the correct date from logs, like:
+ *
+ *      `grep 909df4ba-779f-407a-b562-46730e46a2a5 .pm2/logs/hex-out.log | grep "Move played"`
+ *
+ *      then fix date in database.
+ *
+ * - Back in time, move timestamps were taken from client date.
+ *      This has been fixed: we now set server date on incoming moves.
+ *      This caused first games having moves player date shifted.
+ *      In some case it was like 3 seconds,
+ *      and make player moves date after opponent move response date
+ */
+@Service()
+export class MoveTimestampsAreOrdered implements DataInconsistenciesCheckerInterface
+{
+    constructor(
+        @Inject('Repository<Game>')
+        private gameRepository: Repository<Game>,
+    ) {}
+
+    getDescription(): string
+    {
+        return 'Moves playedAt must be ordered';
+    }
+
+    async run(): Promise<string[]>
+    {
+        const games = await this.gameRepository.find();
+
+        const unordereds: {
+            game: Game;
+            moves: number[];
+        }[] = [];
+
+        for (const game of games) {
+            const moves: number[] = [];
+
+            for (let i = 1; i < game.moveTimestamps.length; ++i) {
+                if (game.moveTimestamps[i] < game.moveTimestamps[i - 1]) {
+                    moves.push(i);
+                }
+            }
+
+            if (moves.length > 0) {
+                unordereds.push({ game, moves });
+            }
+        }
+
+        return unordereds.map(unordered => {
+            const { game, moves } = unordered;
+
+            return `publicId ${game.publicId} gameId ${game.id} ; moves ${moves.join(', ')} (length = ${game.moveTimestamps.length}, opponentType = ${game.opponentType})`;
+        });
+    }
+}

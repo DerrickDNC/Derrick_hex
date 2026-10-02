@@ -1,0 +1,175 @@
+import { GameToPlayer, PlayerHeadToHeadStats, PlayerStats } from '../../shared/app/models/index.js';
+import { Inject, Service } from 'typedi';
+import { Repository } from 'typeorm';
+import { timeControlToCadencyName } from '../../shared/app/timeControlUtils.js';
+import type TimeControlType from '../../shared/time-control/TimeControlType.js';
+
+@Service()
+export default class StatsRepository
+{
+    constructor(
+        @Inject('Repository<GameToPlayer>')
+        private gameToPlayerRepository: Repository<GameToPlayer>,
+    ) {}
+
+    async getPlayerStats(playerId: number): Promise<PlayerStats>
+    {
+        const playerStats = new PlayerStats();
+        const playedGamesQueryBuilder = this.gameToPlayerRepository
+            .createQueryBuilder('gp')
+            .innerJoin('gp.game', 'game')
+            .where('gp.playerId = :playerId')
+            .andWhere('game.state = "ended"')
+            .setParameters({ playerId })
+        ;
+
+        /*
+         * Total played games
+         */
+        playerStats.totalPlayedGames = await playedGamesQueryBuilder.clone()
+            .getCount()
+        ;
+
+        /*
+         * Total played games by 1v1 ranked/unranked
+         */
+        const totalByRanked: { ranked: number, total: string }[] = await playedGamesQueryBuilder.clone()
+            .select('game.ranked as ranked')
+            .addSelect('count(*) as total')
+            .andWhere('game.opponentType = "player"')
+            .groupBy('game.ranked')
+            .getRawMany()
+        ;
+
+        playerStats.totalFriendly = 0;
+        playerStats.totalRanked = 0;
+
+        for (const { ranked, total } of totalByRanked) {
+            playerStats[ranked ? 'totalRanked' : 'totalFriendly'] = Number(total);
+        }
+
+        /*
+         * Total bot games
+         */
+        playerStats.totalBotGames = await playedGamesQueryBuilder.clone()
+            .andWhere('game.opponentType = "ai"')
+            .getCount()
+        ;
+
+        /*
+         * Total played games by board size
+         */
+        const preferredBoardsizes: { boardsize: number, total: string }[] = await playedGamesQueryBuilder.clone()
+            .select('game.boardsize as boardsize, count(*) as total')
+            .groupBy('game.boardsize')
+            .orderBy('game.boardsize')
+            .getRawMany()
+        ;
+
+        playerStats.preferredBoardsizes = {};
+
+        for (const { boardsize, total } of preferredBoardsizes) {
+            playerStats.preferredBoardsizes[boardsize] = Number(total);
+        }
+
+        return playerStats;
+    }
+
+    /**
+     * Stats of a player against another player, from playerId point of view.
+     *
+     * Same games scope as getPlayerStats(): ended 1v1 games, ranked and friendly.
+     */
+    async getHeadToHeadStats(playerId: number, opponentId: number): Promise<PlayerHeadToHeadStats>
+    {
+        /*
+         * Aggregation is done here and not in SQL because summing games durations
+         * ("timestampdiff" on mysql, "extract(epoch from ...)" on postgres)
+         * and guessing whether a game is live or correspondence
+         * cannot be expressed in a portable way.
+         * Number of rows is bounded by the number of games these two players played together.
+         */
+        const rows: {
+            publicId: string;
+            startedAt: null | Date;
+            endedAt: null | Date;
+            boardsize: number;
+            timeControlType: TimeControlType;
+            won: number;
+        }[] = await this.gameToPlayerRepository
+            .createQueryBuilder('gp')
+            .comment('head to head stats')
+            .innerJoin('gp.game', 'game')
+            .innerJoin(
+                GameToPlayer,
+                'opponent',
+                'opponent.gameId = gp.gameId and opponent.order != gp.order and opponent.playerId = :opponentId',
+            )
+            .select('game.publicId', 'publicId')
+            .addSelect('game.startedAt', 'startedAt')
+            .addSelect('game.endedAt', 'endedAt')
+            .addSelect('game.boardsize', 'boardsize')
+            .addSelect('game.timeControlType', 'timeControlType')
+            .addSelect('case when gp.order = game.winner then 1 else 0 end', 'won')
+            .where('gp.playerId = :playerId')
+            .andWhere('game.state = :state')
+            .andWhere('game.opponentType = :opponentType')
+            .orderBy('game.endedAt', 'ASC')
+            .setParameters({ playerId, opponentId, state: 'ended', opponentType: 'player' })
+            .getRawMany()
+        ;
+
+        const headToHeadStats = new PlayerHeadToHeadStats();
+
+        headToHeadStats.totalGames = rows.length;
+        headToHeadStats.wonGames = 0;
+        headToHeadStats.lostGames = 0;
+        headToHeadStats.totalPlayTimeSeconds = 0;
+        headToHeadStats.liveGames = 0;
+        headToHeadStats.firstGamePublicId = null;
+        headToHeadStats.firstGameEndedAt = null;
+        headToHeadStats.lastGamePublicId = null;
+        headToHeadStats.lastGameEndedAt = null;
+
+        if (rows.length === 0) {
+            return headToHeadStats;
+        }
+
+        for (const row of rows) {
+            if (Number(row.won) > 0) {
+                ++headToHeadStats.wonGames;
+            } else {
+                ++headToHeadStats.lostGames;
+            }
+
+            if (row.startedAt === null || row.endedAt === null) {
+                continue;
+            }
+
+            const timeControlType = typeof row.timeControlType === 'string'
+                ? JSON.parse(row.timeControlType) as TimeControlType
+                : row.timeControlType
+            ;
+
+            if (timeControlToCadencyName({ timeControlType, boardsize: row.boardsize }) === 'correspondence') {
+                continue;
+            }
+
+            ++headToHeadStats.liveGames;
+            headToHeadStats.totalPlayTimeSeconds += Math.max(
+                0,
+                Math.round((new Date(row.endedAt).getTime() - new Date(row.startedAt).getTime()) / 1000),
+            );
+        }
+
+        const firstGame = rows[0];
+        const lastGame = rows[rows.length - 1];
+
+        headToHeadStats.firstGamePublicId = firstGame.publicId;
+        headToHeadStats.firstGameEndedAt = firstGame.endedAt === null ? null : new Date(firstGame.endedAt);
+        headToHeadStats.lastGamePublicId = lastGame.publicId;
+        headToHeadStats.lastGameEndedAt = lastGame.endedAt === null ? null : new Date(lastGame.endedAt);
+
+        return headToHeadStats;
+    }
+}

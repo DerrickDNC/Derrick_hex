@@ -1,0 +1,94 @@
+{
+    "publicId": "280fa373-affd-46bd-b2cd-b2cb4578bc94",
+    "host": {
+        "pseudo": "Player A",
+        "publicId": "cec49907-633e-49cb-b720-7dad6c248753",
+        "isGuest": false,
+        "isBot": false,
+        "slug": "player-a",
+        "createdAt": "2024-01-24T16:33:29.586Z"
+    },
+    "gameToPlayers": [
+        {
+            "player": {
+                "pseudo": "Player A",
+                "publicId": "cec49907-633e-49cb-b720-7dad6c248753",
+                "isGuest": false,
+                "isBot": false,
+                "slug": "player-a",
+                "createdAt": "2024-01-24T16:33:29.586Z"
+            }
+        },
+        {
+            "player": {
+                "publicId": "cc9e20bb-e578-4cde-afe0-501855dd3409",
+                "pseudo": "Player B",
+                "slug": "player-b",
+                "isBot": false,
+                "isGuest": false,
+                "createdAt": "2024-01-24T21:03:42.979Z"
+            }
+        }
+    ],
+    "timeControl": {
+        "state": "running",
+        "currentPlayer": 0,
+        "players": [
+            {
+                "totalRemainingTime": "2024-01-24T21:13:58.612Z"
+            },
+            {
+                "totalRemainingTime": 600000
+            }
+        ]
+    },
+    "boardsize": 11,
+    "firstPlayer": null,
+    "swapRule": true,
+    "opponentType": "ai",
+    "timeControlType": {
+        "family": "fischer",
+        "options": {
+            "initialTime": 600000,
+            "timeIncrement": 5000,
+            "maxTime": 600000
+        }
+    },
+    "chatMessages": [],
+    "state": "playing",
+    "createdAt": "2024-01-24T21:03:42.979Z",
+    "moves": [
+        "h3",
+        "d3",
+        "g5",
+        "k5",
+        "c8",
+        "k6",
+        "i9",
+        "c4",
+        "f8",
+        "a10",
+        "e9",
+        "e5"
+    ],
+    "moveTimestamps": [
+        "2024-01-24T21:03:52.289Z",
+        "2024-01-24T21:03:52.289Z",
+        "2024-01-24T21:03:53.821Z",
+        "2024-01-24T21:03:53.822Z",
+        "2024-01-24T21:03:55.026Z",
+        "2024-01-24T21:03:55.027Z",
+        "2024-01-24T21:03:55.877Z",
+        "2024-01-24T21:03:55.879Z",
+        "2024-01-24T21:03:57.254Z",
+        "2024-01-24T21:03:57.254Z",
+        "2024-01-24T21:03:58.611Z",
+        "2024-01-24T21:03:58.611Z"
+    ],
+    "currentPlayerIndex": 0,
+    "winner": null,
+    "outcome": null,
+    "startedAt": "2024-01-24T21:03:42.980Z",
+    "lastMoveAt": "2024-01-24T21:03:58.612Z",
+    "endedAt": null
+}

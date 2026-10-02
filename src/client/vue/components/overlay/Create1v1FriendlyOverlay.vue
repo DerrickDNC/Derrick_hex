@@ -1,0 +1,105 @@
+<script setup lang="ts">
+import { useDisclosure } from '@overlastic/vue';
+import { PropType, reactive, ref, toRef, watch } from 'vue';
+import { GameOptions, Player } from '../../../../shared/app/models/index.js';
+import { IconCaretDownFill, IconCaretRight } from '../../icons.js';
+import AppBoardsize from './create-game/AppBoardsize.vue';
+import AppTimeControl from '../AppTimeControl.vue';
+import AppPlayFirstOrSecond from './create-game/AppPlayFirstOrSecond.vue';
+import AppSwapRule from './create-game/AppSwapRule.vue';
+import AppAllowExploration from './create-game/AppAllowExploration.vue';
+import AppOpponentMustBeRegistered from './create-game/AppOpponentMustBeRegistered.vue';
+import AppOpponentPlayerSelect from './create-game/AppOpponentPlayerSelect.vue';
+import { isCorrespondence } from '../../../../shared/app/timeControlUtils.js';
+
+const { visible, confirm, cancel } = useDisclosure();
+
+const props = defineProps({
+    gameOptions: {
+        type: Object as PropType<GameOptions>,
+        required: true,
+    },
+    presetOpponent: {
+        type: Object as PropType<null | Player>,
+        required: false,
+        default: null,
+    },
+});
+
+const gameOptions = reactive(props.gameOptions);
+
+const timeControl = toRef(gameOptions, 'timeControlType');
+watch(timeControl, t => {
+    gameOptions.timeControlType = t;
+    gameOptions.opponentMustBeRegistered = isCorrespondence({ ...gameOptions, timeControlType: t });
+}, { immediate: true });
+
+const selectedOpponent = ref<null | Player>(props.presetOpponent);
+watch(selectedOpponent, player => {
+    gameOptions.opponentPublicId = player?.publicId ?? null;
+});
+
+const showSecondaryOptions = ref(props.presetOpponent !== null);
+</script>
+
+<template>
+    <div v-if="visible">
+        <div class="modal d-block">
+            <div class="modal-dialog">
+                <form class="modal-content" @submit.prevent="confirm(gameOptions)">
+                    <div class="modal-header">
+                        <h5 class="modal-title">{{ $t('1v1_friendly.title') }}</h5>
+                        <button type="button" class="btn-close" @click="cancel()"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <AppBoardsize v-model="gameOptions.boardsize" />
+                        </div>
+
+                        <div class="mb-3">
+                            <AppTimeControl v-model="timeControl" />
+                        </div>
+
+                        <button
+                            v-if="showSecondaryOptions"
+                            @click="showSecondaryOptions = false"
+                            type="button"
+                            class="btn btn-primary btn-sm mt-3"
+                        ><IconCaretDownFill /> {{ $t('create_game.less_options') }}</button>
+                        <button
+                            v-else
+                            @click="showSecondaryOptions = true"
+                            type="button"
+                            class="btn btn-outline-primary btn-sm mt-3"
+                        ><IconCaretRight /> {{ $t('create_game.more_options') }}</button>
+                    </div>
+                    <div v-if="showSecondaryOptions" class="modal-body border-top">
+                        <div class="mb-3">
+                            <AppPlayFirstOrSecond v-model="gameOptions.firstPlayer" />
+                        </div>
+
+                        <div class="mb-3">
+                            <AppSwapRule v-model="gameOptions.swapRule" />
+                        </div>
+
+                        <div class="mb-3">
+                            <AppAllowExploration v-model="gameOptions.explorationAllowed" />
+                        </div>
+
+                        <div class="mb-3">
+                            <h6>{{ $t('challenge_player') }}</h6>
+                            <AppOpponentPlayerSelect v-model="selectedOpponent" />
+                        </div>
+
+                        <AppOpponentMustBeRegistered v-model="gameOptions.opponentMustBeRegistered" />
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline-secondary" @click="cancel()">{{ $t('cancel') }}</button>
+                        <button type="submit" class="btn btn-success">{{ $t('1v1_friendly.create') }}</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <div class="modal-backdrop show d-fixed"></div>
+    </div>
+</template>
